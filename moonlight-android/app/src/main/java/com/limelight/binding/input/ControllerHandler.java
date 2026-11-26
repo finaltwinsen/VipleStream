@@ -8,6 +8,7 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.hardware.display.DisplayManager;
 import android.hardware.input.InputManager;
 import android.hardware.lights.Light;
 import android.hardware.lights.LightState;
@@ -124,6 +125,24 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
     // §REVIEW-1104：stop() 在主執行緒寫入，rumble／USB 執行緒也要看得到
     private volatile boolean stopped = false;
 
+    // §PERF-R3（2026-11-26）：體感感應器每個樣本（最高 200 Hz × 加速度／陀螺儀兩顆）都要讀螢幕旋轉；
+    // Android 9／10 的 Display.getRotation() 每次都是一次 binder 呼叫（11 起才有系統快取）。
+    // 改成快取旋轉值，只在 DisplayListener 回報顯示變更時作廢、下次讀取再重抓，數值與原本相同。
+    private final DisplayManager displayManager;
+    private volatile int cachedDeviceRotation = -1;
+    private final DisplayManager.DisplayListener rotationInvalidator = new DisplayManager.DisplayListener() {
+        @Override
+        public void onDisplayAdded(int displayId) {}
+
+        @Override
+        public void onDisplayRemoved(int displayId) {}
+
+        @Override
+        public void onDisplayChanged(int displayId) {
+            cachedDeviceRotation = -1;
+        }
+    };
+
     private final PreferenceConfiguration prefConfig;
     private short currentControllers, initialControllers;
 
@@ -136,6 +155,11 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
         this.deviceSensorManager = (SensorManager) activityContext.getSystemService(Context.SENSOR_SERVICE);
         this.inputManager = (InputManager) activityContext.getSystemService(Context.INPUT_SERVICE);
         this.mainThreadHandler = new Handler(Looper.getMainLooper());
+        // §PERF-R3（2026-11-26）：旋轉快取的作廢通知，回呼在主執行緒
+        this.displayManager = (DisplayManager) activityContext.getSystemService(Context.DISPLAY_SERVICE);
+        if (this.displayManager != null) {
+            this.displayManager.registerDisplayListener(rotationInvalidator, mainThreadHandler);
+        }
 
         // Create a HandlerThread to process battery state updates. These can be slow enough
         // that they lead to ANRs if we do them on the main thread.
@@ -273,6 +297,9 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
 
         // Unregister our input device callbacks
         inputManager.unregisterInputDeviceListener(this);
+        if (displayManager != null) {
+            displayManager.unregisterDisplayListener(rotationInvalidator);
+        }
 
         for (int i = 0; i < inputDeviceContexts.size(); i++) {
             InputDeviceContext deviceContext = inputDeviceContexts.valueAt(i);
@@ -2210,7 +2237,12 @@ public class ControllerHandler implements InputManager.InputDeviceListener, UsbD
                 int zFactor = 1;
 
                 if (needsDeviceOrientationCorrection) {
-                    int deviceRotation = activityContext.getWindowManager().getDefaultDisplay().getRotation();
+                    // §PERF-R3（2026-11-26）：讀快取，顯示變更後才重抓（見 cachedDeviceRotation）
+                    int deviceRotation = cachedDeviceRotation;
+                    if (deviceRotation < 0) {
+                        deviceRotation = activityContext.getWindowManager().getDefaultDisplay().getRotation();
+                        cachedDeviceRotation = deviceRotation;
+                    }
                     switch (deviceRotation) {
                         case Surface.ROTATION_0:
                         case Surface.ROTATION_180:

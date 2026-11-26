@@ -23,6 +23,7 @@ extern "C" {
 
 // local includes
 #include "abr_congestion.h"
+#include "abr_signals.h"
 #include "cbs.h"
 #include "config.h"
 #include "display_device.h"
@@ -2725,6 +2726,11 @@ namespace video {
     int qsv_pending_kbps = 0;
     // §REVIEW-1119：回傳編碼器有沒有真的套用。NVENC 重設失敗時呼叫端不可以把 last_applied_bitrate_kbps 往前推，
     // 否則之後的升降方向（要不要 IDR）會拿一個沒生效的值來比。
+    // §ENC-KBPS（2026-11-26）：只有 NVENC 建立時會 abr_signals::reset()，AVCodec／PyroWave 場次的 enc=、平均 QP、
+    // codec 一直是 -1 或「上一個 NVENC 場次」留下的值。這裡替非 NVENC 編碼器補一次，下面調碼率時也記下套用值。
+    if (!dynamic_cast<nvenc_encode_session_t *>(session.get())) {
+      abr_signals::reset(config.videoFormat, config.bitrate);
+    }
     const auto apply_encoder_bitrate = [&](int kbps, bool is_decrease) -> bool {
       const int div = std::max(1, vr_enc_div);
       const int enc_kbps = div > 1 ? std::min(kbps * div, std::max(config.bitrate, kbps)) : kbps;
@@ -2758,6 +2764,7 @@ namespace video {
         if (!(encoder.flags & NO_RC_BUF_LIMIT)) {
           ctx->rc_buffer_size = newBitrate / std::max(1, config.framerate);
         }
+        abr_signals::enc_kbps.store(enc_kbps, std::memory_order_relaxed);
         BOOST_LOG(info) << "[VIPLE-ABR] AVCodec bitrate updated to " << kbps
                         << " kbps (" << (is_decrease ? "cut" : "ramp") << (div > 1 ? std::format(", encoder setting {} kbps for 1/{} rate", enc_kbps, div) : std::string {}) << ")";
         return true;
@@ -2796,6 +2803,7 @@ namespace video {
       }
       if (auto pyro_session = dynamic_cast<pyrowave::pyrowave_encode_session_t *>(session.get())) {
         pyro_session->reconfigure_bitrate(kbps, config.framerate / div);
+        abr_signals::enc_kbps.store(kbps, std::memory_order_relaxed);
       }
       return true;
     };

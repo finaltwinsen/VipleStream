@@ -1791,6 +1791,25 @@ private:
     PFN_vkDestroyDevice       m_pfnDestroyDevice       = nullptr;
     PFN_vkDestroySurfaceKHR   m_pfnDestroySurfaceKHR   = nullptr;
 
+    // §PERF-R3（2026-11-26）：每幀錄製補幀 compute chain／RIFE／overlay 用的 device 函式指標。
+    // 原本每幀每個函式各自 vkGetInstanceProcAddr＋十幾次 vkGetDeviceProcAddr（字串查表）。
+    // device 層函式指標在 device 存活期間固定（Vulkan 規格），m_Device 只在 initialize 建一次，
+    // 建好就一次查完，之後只讀；任何一個查不到就是 nullptr，各呼叫端原本的 null 檢查照舊生效。
+    struct FrameCmdFns {
+        PFN_vkCmdBindPipeline         CmdBindPipeline       = nullptr;
+        PFN_vkCmdBindDescriptorSets   CmdBindDescriptorSets = nullptr;
+        PFN_vkCmdPushConstants        CmdPushConstants      = nullptr;
+        PFN_vkCmdDispatch             CmdDispatch           = nullptr;
+        PFN_vkCmdPipelineBarrier      CmdPipelineBarrier    = nullptr;
+        PFN_vkCmdCopyBuffer           CmdCopyBuffer         = nullptr;
+        PFN_vkCmdResetQueryPool       CmdResetQueryPool     = nullptr;
+        PFN_vkCmdWriteTimestamp       CmdWriteTimestamp     = nullptr;
+        PFN_vkGetQueryPoolResults     GetQueryPoolResults   = nullptr;
+        PFN_vkCmdCopyBufferToImage    CmdCopyBufferToImage  = nullptr;
+        PFN_vkCmdCopyImageToBuffer    CmdCopyImageToBuffer  = nullptr;
+    };
+    FrameCmdFns m_FrameFns;
+
     // §J.3.e.2.i.8 Phase 1.3d.2 debug — VK_EXT_debug_utils messenger to route
     // Vulkan validation layer messages through SDL_Log so they land in our
     // log file alongside renderer events.  Created when the extension is

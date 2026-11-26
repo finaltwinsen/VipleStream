@@ -137,6 +137,10 @@ private:
     int m_Retries = 10;
 };
 
+// §PERF-R3（2026-11-26）：叫醒正在等輪詢間隔的 PcMonitorThread（定義在 computermanager.cpp，
+// 那裡才看得到 PcMonitorThread 的完整型別）。不是 PcMonitorThread 就什麼都不做
+void computerPollingWakeThread(QThread* thread);
+
 class ComputerPollingEntry
 {
 public:
@@ -192,6 +196,8 @@ public:
         if (m_ActiveThread != nullptr) {
             // Interrupt the active thread
             m_ActiveThread->requestInterruption();
+            // §PERF-R3（2026-11-26）：輪詢執行緒的等待不再切 1 秒一段，要主動叫醒它才會馬上結束
+            computerPollingWakeThread(m_ActiveThread);
 
             // Place it on the inactive list awaiting death
             m_InactiveList.append(m_ActiveThread);

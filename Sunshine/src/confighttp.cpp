@@ -8,6 +8,7 @@
 
 // standard includes
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <cstdint>
 #include <cstring>
@@ -15,6 +16,7 @@
 #include <format>
 #include <fstream>
 #include <string_view>
+#include <thread>
 
 // lib includes
 #include <boost/algorithm/string.hpp>
@@ -1869,16 +1871,52 @@ pollListing();
     }
 
     // §LOGDROP：網頁按鈕是手動，跟串流結束、異常結束的 trigger 分開。
-    const auto result = logdrop::upload(note, "manual");
-    nlohmann::json output_tree;
-    if (result.ok) {
-      output_tree["status"] = true;
-      output_tree["code"] = result.code;
-    } else {
+    // §LOGDROP-ASYNC（2026-11-26）：上傳最長 120 秒，原本直接在 SimpleWeb 唯一的 io 執行緒上跑，
+    // 這段時間整個網頁介面（含其他分頁的 API）都卡住。改在背景執行緒上傳、完成時才寫回應：
+    // SimpleWeb 的 Response 是 shared_ptr，可以從別的執行緒寫（官方範例 /work 就是這樣），前端不用改。
+    // 同時只允許一個手動上傳，重複按回 busy。
+    static std::atomic_bool s_manual_upload_running {false};
+    if (s_manual_upload_running.exchange(true)) {
+      nlohmann::json output_tree;
       output_tree["status"] = false;
-      output_tree["error"] = result.error.empty() ? "internal"sv : result.error;
+      output_tree["error"] = "busy";
+      send_response(response, output_tree);
+      return;
     }
-    send_response(response, output_tree);
+    try {
+      std::thread([response, note]() {
+        nlohmann::json output_tree;
+        try {
+          const auto result = logdrop::upload(note, "manual");
+          if (result.ok) {
+            output_tree["status"] = true;
+            output_tree["code"] = result.code;
+          } else {
+            output_tree["status"] = false;
+            output_tree["error"] = result.error.empty() ? "internal"sv : result.error;
+          }
+        } catch (const std::exception &e) {
+          BOOST_LOG(warning) << "UploadLogs: "sv << e.what();
+          output_tree["status"] = false;
+          output_tree["error"] = "internal";
+        }
+        s_manual_upload_running.store(false);
+        send_response(response, output_tree);
+      }).detach();
+    } catch (const std::system_error &e) {
+      // 開不了執行緒就照舊同步做，不讓按鈕失效
+      BOOST_LOG(warning) << "UploadLogs: thread: "sv << e.what();
+      const auto result = logdrop::upload(note, "manual");
+      s_manual_upload_running.store(false);
+      nlohmann::json output_tree;
+      output_tree["status"] = result.ok;
+      if (result.ok) {
+        output_tree["code"] = result.code;
+      } else {
+        output_tree["error"] = result.error.empty() ? "internal"sv : result.error;
+      }
+      send_response(response, output_tree);
+    }
   }
 
   // §LOGDROP：給首頁決定要不要問，以及疑難排解頁顯示匿名 ID。驗證跟其他 GET 一樣，沒有 CSRF。

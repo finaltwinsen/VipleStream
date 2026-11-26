@@ -1339,16 +1339,19 @@ namespace stream {
       reed_solomon_release(rs);
     }>;
 
+    // §PERF-R3（2026-11-26）：三塊緩衝改成 std::vector 並由 encode() 的 thread_local 實例重複使用。原本每個 FEC block
+    // （每幀 1–4 次）都 make_unique 配置並清零 parity／header／指標陣列，用完即丟；內容每次都會整片覆寫（見 encode()），
+    // 清零與配置都是白做。encode() 回傳的參考只在同一執行緒下一次呼叫 encode() 之前有效（呼叫端在同一輪 block 就送完）。
     struct fec_t {
-      size_t data_shards;
-      size_t nr_shards;
-      size_t percentage;
+      size_t data_shards = 0;
+      size_t nr_shards = 0;
+      size_t percentage = 0;
 
-      size_t blocksize;
-      size_t prefixsize;
-      util::buffer_t<char> shards;
-      util::buffer_t<char> headers;
-      util::buffer_t<uint8_t *> shards_p;
+      size_t blocksize = 0;
+      size_t prefixsize = 0;
+      std::vector<char> shards;
+      std::vector<char> headers;
+      std::vector<uint8_t *> shards_p;
 
       std::vector<platf::buffer_descriptor_t> payload_buffers;
 
@@ -1365,9 +1368,24 @@ namespace stream {
       }
     };
 
-    static fec_t encode(const std::string_view &payload, size_t blocksize, size_t fecpercentage, size_t minparityshards, size_t prefixsize) {
+    static fec_t &encode(const std::string_view &payload, size_t blocksize, size_t fecpercentage, size_t minparityshards, size_t prefixsize) {
+      // §PERF-R3（2026-11-26）：重複使用本執行緒的實例（容量留著），見 fec_t 的說明
+      static thread_local fec_t out;
+      // 不合法的輸入回空結果（與原本的 return {} 相同：0 片、沒有 payload 描述、沒有 header）
+      auto empty_result = [&]() -> fec_t & {
+        out.data_shards = 0;
+        out.nr_shards = 0;
+        out.percentage = 0;
+        out.blocksize = 0;
+        out.prefixsize = 0;
+        out.shards.clear();
+        out.headers.clear();
+        out.shards_p.clear();
+        out.payload_buffers.clear();
+        return out;
+      };
       if (blocksize == 0) {
-        return {};
+        return empty_result();
       }
       auto payload_size = payload.size();
 
@@ -1376,7 +1394,7 @@ namespace stream {
       auto aligned_data_shards = payload_size / blocksize;
       auto data_shards = aligned_data_shards + (pad ? 1 : 0);
       if (data_shards == 0) {
-        return {};
+        return empty_result();
       }
       auto parity_shards = (data_shards * fecpercentage + 99) / 100;
 
@@ -1394,10 +1412,18 @@ namespace stream {
       // If we need to store a zero-padded data shard, allocate that first to
       // to keep the shards in order and reduce buffer fragmentation
       auto parity_shard_offset = pad ? 1 : 0;
-      util::buffer_t<char> shards {(parity_shard_offset + parity_shards) * blocksize};
-      util::buffer_t<uint8_t *> shards_p {nr_shards};
-      std::vector<platf::buffer_descriptor_t> payload_buffers;
-      payload_buffers.reserve(2);
+      // §PERF-R3（2026-11-26）：resize 只在變大時配置。不需要清零：補零的那一片下面 memcpy＋memset 整片寫滿，
+      // parity 片由 reed_solomon_encode 的 gemm 先 memset 再累加（third-party/nanors/rs.c），header 片在加密時整片寫入
+      // （iv＋frameNumber＋tag，struct 沒有填充位元組；不加密時 prefixsize＝0、一個位元組都不送）。
+      auto &shards = out.shards;
+      auto &shards_p = out.shards_p;
+      auto &payload_buffers = out.payload_buffers;
+      shards.resize((parity_shard_offset + parity_shards) * blocksize);
+      shards_p.resize(nr_shards);
+      payload_buffers.clear();
+      // header 緩衝至少留 1 個位元組：原本 make_unique<char[]>(0) 也是非空指標，platf::send_batch 以 headers 是否為空
+      // 決定走「每包 header＋payload 交錯」還是「連續 payload」路徑，必須維持非空才與原本走同一條路徑
+      out.headers.resize(std::max<size_t>(nr_shards * prefixsize, 1));
 
       // Point into the payload buffer for all except the final padded data shard
       auto next = const_cast<char *>(payload.data());
@@ -1423,7 +1449,7 @@ namespace stream {
       }
 
       // Add a payload buffer describing the shard buffer
-      payload_buffers.emplace_back(std::begin(shards), shards.size());
+      payload_buffers.emplace_back(shards.data(), shards.size());
 
       if (fecpercentage != 0) {
         // Point into our allocated buffer for the parity shards
@@ -1447,22 +1473,17 @@ namespace stream {
         if (!s_rs) {
           // 片數組合不合法（不該發生：上游已限制每區塊的資料片數）：這一塊不送，不要對空指標編碼
           s_ds = s_ps = 0;
-          return {};
+          return empty_result();
         }
-        reed_solomon_encode(s_rs.get(), shards_p.begin(), (int) nr_shards, (int) blocksize);
+        reed_solomon_encode(s_rs.get(), shards_p.data(), (int) nr_shards, (int) blocksize);
       }
 
-      return {
-        data_shards,
-        nr_shards,
-        fecpercentage,
-        blocksize,
-        prefixsize,
-        std::move(shards),
-        util::buffer_t<char> {nr_shards * prefixsize},
-        std::move(shards_p),
-        std::move(payload_buffers),
-      };
+      out.data_shards = data_shards;
+      out.nr_shards = nr_shards;
+      out.percentage = fecpercentage;
+      out.blocksize = blocksize;
+      out.prefixsize = prefixsize;
+      return out;
     }
   }  // namespace fec
 
@@ -6384,12 +6405,13 @@ namespace stream {
 
           frame_fec_latency_logger.first_point_now();
           // If video encryption is enabled, we allocate space for the encryption header before each shard
-          auto shards = fec::encode(current_payload, blocksize, fecPercentage, session->config.minRequiredFecPackets, session->video.cipher ? sizeof(video_packet_enc_prefix_t) : 0);
+          // §PERF-R3（2026-11-26）：拿參考（本執行緒重複使用的緩衝），只在這一個 block 的送出期間使用，下一次 encode() 前就用完
+          auto &shards = fec::encode(current_payload, blocksize, fecPercentage, session->config.minRequiredFecPackets, session->video.cipher ? sizeof(video_packet_enc_prefix_t) : 0);
           frame_fec_latency_logger.second_point_now_and_log();
 
           auto peer_address = session->video.peer.address();
           auto batch_info = platf::batched_send_info_t {
-            shards.headers.begin(),
+            shards.headers.data(),
             shards.prefixsize,
             shards.payload_buffers,
             shards.blocksize,

@@ -489,8 +489,11 @@ public final class GlassesVrSession {
                 backoffMs = IMU_RETRY_BASE_MS;
                 imuGiveUp = false;
                 long waitMs = (deadline - now) / 1_000_000L;
-                if (waitMs > 200L) {
-                    waitMs = 200L;
+                // §PERF-R3（2026-11-26）：原本上限 200 ms，IMU 正常（240 Hz）時每秒醒 5 次只為了看時間戳。
+                // 醒來時會依最新的 arrivalNs 重算截止點，所以直接睡到截止點，偵測「最後一筆＋500 ms」的時刻不變；
+                // 結束時 close() 會 interrupt 這條執行緒，不靠短睡眠。上限放到開機寬限（1 秒）。
+                if (waitMs > IMU_BOOT_NS / 1_000_000L) {
+                    waitMs = IMU_BOOT_NS / 1_000_000L;
                 }
                 if (waitMs < 20L) {
                     waitMs = 20L;

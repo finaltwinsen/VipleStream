@@ -24,6 +24,7 @@ import com.limelight.preferences.PreferenceConfiguration;
 import android.annotation.TargetApi;
 import android.app.Activity;
 import android.content.Context;
+import android.hardware.display.DisplayManager;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
@@ -137,6 +138,24 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
     private boolean needsBaselineSpsHack;
     private SeqParameterSet savedSps;
+
+    // §PERF-R3（2026-11-26）：H.264 SPS 修補結果快取（只在送幀執行緒使用），見 submitDecodeUnit
+    private byte[] lastRawSps;
+    private byte[] lastPatchedSps;
+    private boolean lastSpsRfiActive;
+    private int lastSpsRefreshRate;
+
+    private static boolean spsBytesEqual(byte[] cached, byte[] data, int length) {
+        if (cached == null || cached.length != length) {
+            return false;
+        }
+        for (int i = 0; i < length; i++) {
+            if (cached[i] != data[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
 
     private RendererException initialException;
     private long initialExceptionTimestamp;
@@ -1282,6 +1301,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             vpsBuffers.clear();
             spsBuffers.clear();
             ppsBuffers.clear();
+            // §PERF-R3（2026-11-26）：解碼器重新設定後，修補條件可能不同，SPS 快取作廢
+            lastRawSps = null;
+            lastPatchedSps = null;
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                 // This will contain the actual accepted input format attributes
@@ -1805,7 +1827,14 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            frameTimeNanos -= activity.getWindowManager().getDefaultDisplay().getAppVsyncOffsetNanos();
+            // §PERF-R3（2026-11-26）：每個 vsync（90～144 Hz）都查一次 app vsync offset，在 Android 9／10
+            // 是一次 binder。值只隨顯示模式變，改成快取、DisplayListener 回報變更時才重抓（同執行緒，數值相同）。
+            long offsetNs = cachedAppVsyncOffsetNs;
+            if (offsetNs == Long.MIN_VALUE) {
+                offsetNs = activity.getWindowManager().getDefaultDisplay().getAppVsyncOffsetNanos();
+                cachedAppVsyncOffsetNs = offsetNs;
+            }
+            frameTimeNanos -= offsetNs;
         }
 
         // Don't render unless a new frame is due. This prevents microstutter when streaming
@@ -1876,6 +1905,12 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
         // Start the frame callbacks
         choreographerHandler = new Handler(choreographerHandlerThread.getLooper());
+        // §PERF-R3（2026-11-26）：vsync offset 快取的作廢通知，回呼跑在 Choreographer 執行緒（與 doFrame 同一條）
+        cachedAppVsyncOffsetNs = Long.MIN_VALUE;
+        vsyncOffsetDisplayManager = (DisplayManager) activity.getSystemService(Context.DISPLAY_SERVICE);
+        if (vsyncOffsetDisplayManager != null) {
+            vsyncOffsetDisplayManager.registerDisplayListener(vsyncOffsetInvalidator, choreographerHandler);
+        }
         choreographerHandler.post(new Runnable() {
             @Override
             public void run() {
@@ -1883,6 +1918,22 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
             }
         });
     }
+
+    // §PERF-R3（2026-11-26）：見 doFrame；Long.MIN_VALUE＝尚未讀取或顯示已變更
+    private long cachedAppVsyncOffsetNs = Long.MIN_VALUE;
+    private DisplayManager vsyncOffsetDisplayManager;
+    private final DisplayManager.DisplayListener vsyncOffsetInvalidator = new DisplayManager.DisplayListener() {
+        @Override
+        public void onDisplayAdded(int displayId) {}
+
+        @Override
+        public void onDisplayRemoved(int displayId) {}
+
+        @Override
+        public void onDisplayChanged(int displayId) {
+            cachedAppVsyncOffsetNs = Long.MIN_VALUE;
+        }
+    };
 
     private void startRendererThread()
     {
@@ -2145,6 +2196,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                 android.opengl.EGL14.EGL_NO_SURFACE, android.opengl.EGL14.EGL_NO_SURFACE, android.opengl.EGL14.EGL_NO_CONTEXT);
                     }
                     choreographerHandlerThread.quit();
+                    if (vsyncOffsetDisplayManager != null) {
+                        vsyncOffsetDisplayManager.unregisterDisplayListener(vsyncOffsetInvalidator);
+                    }
 
                     // Deregister the frame callback (if registered)
                     Choreographer.getInstance().removeFrameCallback(MediaCodecDecoderRenderer.this);
@@ -2502,6 +2556,19 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
                 numSpsIn++;
 
+                // §PERF-R3（2026-11-26）：每個 IDR（丟包恢復時會連發）都重新解析＋重寫 SPS、配置新陣列並寫
+                // 好幾行 logcat，全在送幀執行緒上。修補只取決於原始 SPS 位元組與本場固定的解碼器條件，
+                // 所以原始位元組（含起始碼的整段 NAL）與修補條件都跟上一次相同時，直接沿用上次修補結果。
+                // baseline hack 會動 savedSps／needsBaselineSpsHack，那條路徑不走快取。
+                if (!needsBaselineSpsHack && lastPatchedSps != null
+                        && lastSpsRfiActive == refFrameInvalidationActive
+                        && lastSpsRefreshRate == refreshRate
+                        && spsBytesEqual(lastRawSps, decodeUnitData, decodeUnitLength)) {
+                    if (spsBuffers.size() >= 8) { spsBuffers.clear(); }
+                    spsBuffers.add(lastPatchedSps);
+                    return MoonBridge.DR_OK;
+                }
+
                 ByteBuffer spsBuf = ByteBuffer.wrap(decodeUnitData, 0, decodeUnitLength);
 
                 // Skip to the start of the NALU data
@@ -2644,6 +2711,14 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 // trimmed it for the whole session; the whole list is also what gets written into one input buffer.
                 if (spsBuffers.size() >= 8) { spsBuffers.clear(); }
                 spsBuffers.add(naluBuffer);
+                // §PERF-R3（2026-11-26）：記下這次的原始 SPS 與修補結果，下一個相同的 IDR 直接沿用
+                // （spsBuffers 裡的陣列只會被讀出寫進輸入緩衝，不會被改，可以共用同一份）
+                if (!needsBaselineSpsHack) {
+                    lastRawSps = Arrays.copyOf(decodeUnitData, decodeUnitLength);
+                    lastPatchedSps = naluBuffer;
+                    lastSpsRfiActive = refFrameInvalidationActive;
+                    lastSpsRefreshRate = refreshRate;
+                }
                 return MoonBridge.DR_OK;
             }
             else if (decodeUnitType == MoonBridge.BUFFER_TYPE_VPS) {

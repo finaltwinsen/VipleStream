@@ -126,7 +126,7 @@ private:
     unsigned int m_Fbo = 0;   // 讀回用
     QTimer m_RenderTimer;
     bool m_NeedSync = true;
-    QImage m_Last;            // 最後一張（dump 用）
+    QImage m_Last;            // 最後一張（dump 用）；§PERF-R3（2026-11-26）：列由下往上（glReadPixels 原樣）
     uint64_t m_Frames = 0;
     uint64_t m_RenderNs = 0;  // 10 秒視窗：畫＋讀回的時間
     uint64_t m_WinStartNs = 0;

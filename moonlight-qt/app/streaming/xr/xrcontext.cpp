@@ -353,13 +353,14 @@ void XrContext::requestKeyboard(bool open)
     }
 }
 
-void XrContext::setShellImage(const QImage& img)
+void XrContext::setShellImage(const QImage& img, bool bottomUp)
 {
     if (img.isNull()) {
         return;
     }
     std::lock_guard<std::mutex> lk(m_ShellMutex);
     m_ShellImg = img;
+    m_ShellImgBottomUp = bottomUp;  // §PERF-R3（2026-11-26）：和圖一起換（同一把鎖）
     m_ShellDirty = true;
 }
 
@@ -1899,7 +1900,7 @@ void XrContext::keyboardRenderThreadMain()
     }
 }
 
-bool XrContext::uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, const QImage& src)
+bool XrContext::uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, const QImage& src, bool bottomUp)
 {
     const bool bgra = m_QuadFormat == VK_FORMAT_B8G8R8A8_SRGB || m_QuadFormat == VK_FORMAT_B8G8R8A8_UNORM;
     const bool rgba = m_QuadFormat == VK_FORMAT_R8G8B8A8_SRGB || m_QuadFormat == VK_FORMAT_R8G8B8A8_UNORM;
@@ -1965,7 +1966,9 @@ bool XrContext::uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, con
         m_StagingSize = size;
     }
     for (uint32_t y = 0; y < h; y++) {
-        std::memcpy(static_cast<uint8_t*>(m_StagingPtr) + static_cast<size_t>(y) * w * 4, img.constScanLine(static_cast<int>(y)),
+        // §PERF-R3（2026-11-26）：bottomUp 的來源在這裡倒著抄（staging 第 y 列＝畫面由上數第 y 列），結果與先翻再抄逐位元相同
+        const int srcRow = bottomUp ? static_cast<int>(h - 1 - y) : static_cast<int>(y);
+        std::memcpy(static_cast<uint8_t*>(m_StagingPtr) + static_cast<size_t>(y) * w * 4, img.constScanLine(srcRow),
                     static_cast<size_t>(w) * 4);
     }
 
@@ -2960,17 +2963,19 @@ void XrContext::frameThreadMain()
         if (shellOn && fs.shouldRender) {
             // §VR-SHELL：介面畫面（不透明 quad，位置與寬同影像螢幕；高＝寬÷面板比例）
             QImage img;
+            bool imgBottomUp = false;  // §PERF-R3（2026-11-26）：見 setShellImage
             {
                 std::lock_guard<std::mutex> lk(m_ShellMutex);
                 if (m_ShellDirty) {
                     img = m_ShellImg;
+                    imgBottomUp = m_ShellImgBottomUp;
                     m_ShellDirty = false;
                 }
             }
             if (!img.isNull() && static_cast<uint32_t>(img.width()) == m_Options.shellWidth &&
                 static_cast<uint32_t>(img.height()) == m_Options.shellHeight) {
                 // §REVIEW-1111（第二輪）：介面的最後一次重畫上傳失敗時，畫面會停在舊的那一張直到下一次重畫；下一格再試
-                if (uploadImage(m_ShellSwapchain, m_ShellImages, m_ShellImageCount, img)) {
+                if (uploadImage(m_ShellSwapchain, m_ShellImages, m_ShellImageCount, img, imgBottomUp)) {
                     m_ShellUploaded = true;
                     m_ShellUploadRetries = 0;
                 }

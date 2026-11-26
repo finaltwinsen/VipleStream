@@ -9,10 +9,10 @@
 
 | 優先級 | 條目 | 待做事項 |
 |---|---|---|
-| **Active（M0～M4a 與 2.0.x 已發佈；剩下列尾項）** | **§VR** 2.0 Steam Frame（桌面模式 + PCVR） | 設計見 `docs/vr_architecture.md`、`docs/vr_protocol.md`、`docs/steam_frame_client.md`、`docs/steamvr_driver.md`；完成史在 git log。近期待辦見下方各日期章節與「§VR 補充」。**早期留下、還沒收掉的（多數要核對是否仍成立）**：(1) V4／V5 未解——9 次中 3 次 vrcompositor 自己重畫第 0 層（T4 圖案解不出）；消費端停止／standby 時 vrcompositor `AcquireSync` 逾時、`ReleaseSync 0x887a0001`，根因未明；維護 tick 每 60 s 建 D3D11 device 對串流的影響未量；RTSP dynamicRange 覆寫在現行 client 下觸發不到。(2) V5／V6 延後——註銷 hook／`--steamvr-driver uninstall`、T5／T7、PoC-10、PoC-5a（selftest `--preset` 未實作）；G-DRV 2（T4 不經 manual 的 1 h hold、`reproj` 獨立量測、Present 間隔 p99 要逐幀 log）、3／3'／3''（要 `--probe space` 與 `gdrv:chaperone-offset` preset）、4b／4c、5（空白注入）、6（T7）；`--attach-session`、`--only cleanup`；stub 模式下 guard 不還原；session 結束後 SteamVR 不會自動關（待核對）；上行 tracking 在下行斷線後改走 QUIC 且不回 ENet；GPU copy timestamp 抽樣；S3-09 重定值待確認（vr_architecture §8.2）。(3) XR 桌面——XR 模式平面 backend 仍建 swapchain、開場 shader 預熱；VAAPI 比軟解 R +3 的固定偏移（Frame iris 待實機比對）；虛擬鍵盤 Caps 鎖定、數字鍵盤；Frame 左手面鍵幾何與左 view 開關實機確認。(4) 配戴 A/B——A4 overscan 0 vs 3；錯配若真的發生，再把 release 與 publish 併進同一段 queueMutex；§VR-REARM 的 Frame 實機驗證。(5) Windows CLI 串流行程被強制結束後可能停在結束階段（剩 1 條執行緒、`taskkill` 殺不掉、鎖住 `temp\moonlight`；打包腳本已改成把鎖住的檔案移到 `temp\moonlight.locked-*`），根因未查。(6) 實機 PoC-2b／G-β、PoC-F-pre（要使用者在場）。(7) 使用者端待決（10-03，待核對）：適配器移位、Frame 家用 Wi‑Fi 是否鎖定 BSSID。(8) 既有問題（非 VR，待核對）：`session.cpp` 的 `QHostAddress::isPrivateUse()` 要 Qt 6.6（WSL 的 Qt 6.4 編不過）；`build_all.cmd` 可選的 WSL AppImage 步驟一定失敗；benchmark harness 寫的是舊路徑 registry key。見下方「§VR 補充」 |
+| **Active（M0～M4a 與 2.0.x 已發佈；剩下列尾項）** | **§VR** 2.0 Steam Frame（桌面模式 + PCVR） | 設計見 `docs/vr_architecture.md`、`docs/vr_protocol.md`、`docs/steam_frame_client.md`、`docs/steamvr_driver.md`；完成史在 git log。近期待辦見下方各日期章節與「§VR 補充」。**早期留下、還沒收掉的（多數要核對是否仍成立）**：(1) V4／V5 未解——9 次中 3 次 vrcompositor 自己重畫第 0 層（T4 圖案解不出）；消費端停止／standby 時 vrcompositor `AcquireSync` 逾時、`ReleaseSync 0x887a0001`，根因未明；維護 tick 每 60 s 建 D3D11 device 對串流的影響未量；RTSP dynamicRange 覆寫在現行 client 下觸發不到。(2) V5／V6 延後——註銷 hook／`--steamvr-driver uninstall`、T5／T7、PoC-10、PoC-5a（selftest `--preset` 未實作）；G-DRV 2（T4 不經 manual 的 1 h hold、`reproj` 獨立量測、Present 間隔 p99 要逐幀 log）、3／3'／3''（要 `--probe space` 與 `gdrv:chaperone-offset` preset）、4b／4c、5（空白注入）、6（T7）；`--attach-session`、`--only cleanup`；stub 模式下 guard 不還原；session 結束後 SteamVR 不會自動關（待核對）；上行 tracking 在下行斷線後改走 QUIC 且不回 ENet；GPU copy timestamp 抽樣；S3-09 重定值待確認（vr_architecture §8.2）。(3) XR 桌面——XR 模式平面 backend 仍建 swapchain、開場 shader 預熱；VAAPI 比軟解 R +3 的固定偏移（Frame iris 待實機比對）；Frame 左手面鍵幾何與左 view 開關實機確認。(4) 配戴 A/B——A4 overscan 0 vs 3；錯配若真的發生，再把 release 與 publish 併進同一段 queueMutex；§VR-REARM 的 Frame 實機驗證。(5) Windows CLI 串流行程被強制結束後可能停在結束階段（剩 1 條執行緒、`taskkill` 殺不掉、鎖住 `temp\moonlight`；打包腳本已改成把鎖住的檔案移到 `temp\moonlight.locked-*`），根因未查。(6) 實機 PoC-2b／G-β、PoC-F-pre（要使用者在場）。(7) 使用者端待決（10-03，待核對）：適配器移位、Frame 家用 Wi‑Fi 是否鎖定 BSSID。見下方「§VR 補充」 |
 | **Active (已建置，逐項驗證大多還沒做)** | **§PERF-R2** 第二輪效率審查（2026-11-13～14） | A 節 49 項（不需實機就能改的）：47 項完成、2 項做了一半（A15 的 AVCodec／PyroWave 那一半、A21 的設定頁 VR 區 Loader），沒有略過或撤回的。Windows client／server、Android、頭盔 aarch64 都建得出來，Windows client `--help` 連跑兩次 rc=0；頭盔 11-14 兩場無人、三場配戴整場正常（注視點分塊走頂點屬性那條路）。**還沒做**：macOS server 的建置、依總表逐項驗、A25／A39 的畫面逐像素比對。B 節 32 項（要實機量測或配戴才能決定）還沒動。細節見下方「§PERF-R2」一節與本機 `temp/perf_review_1113/r2fix_00_summary.md` |
 | **Active (已實作並驗證 Windows；XR 桌面待 Frame 實測)** | **§H.4-AUTO／§H.4-SWITCH** client 解析度／更新率「自動（本機螢幕最佳）」＋host VDD 跟著切 | 2026-10-01：server `/serverinfo` 在 dd 開啟且 `output_name` 對得到已啟用裝置時回報該裝置**可切換的最高模式**＋`<DisplayModeSwitchable>1`（`EnumDisplaySettingsW` 列舉、快取 10 秒；否則退回 primary 目前模式）；client 解析度與 FPS 各加「自動」（新安裝預設；既有設定保留原值），串流時取串流視窗所在螢幕的桌面模式，與 host 可切換最高模式取小，預設位元率跟著重算；CLI `--resolution auto`／`--fps auto`。**已驗**（`<host>` VDD 閒置 1080p180）：serverinfo 回 3840x2160@244；1440p120、4K120 host 都切到要求模式、結束回 1080p180；自動在 1080p180 client 串 1920x1080@180、位元率 35 Mbps。S1（linux-builder x86_64 Flatpak＋無頭 Monado，runtime 20 Hz）：XR 桌面自動解析成 2560x1440@20、位元率 13 Mbps；順帶發現要求的 Hz 不在 VDD 模式表時 Windows 設模式整個失敗（1610）→ 加 §H.4-SNAP（顯示器改設 ≥ 要求值的最小可用 Hz），重測 host 切到 2560x1440@60。設定頁「自動」兩個項目已目視確認並補 zh_TW 翻譯（2026-10-02）。**待做**：XR 桌面自動在 Frame 實測（Frame 實際 72 Hz，預期 host 顯示器 snap 到 90 Hz、串流 72 fps）。 |
-| **Active (已實作；之後已發多版，系統匣的真實更新還沒有人走過)** | **§SELF-UPDATE** host 自我更新（tray 兩段式 + CLI） | 2026-09-22 實作：HEAD-302 查版、GitHub asset digest 必驗、Windows 腳本兩段式 rename 回滾／Linux apt 路徑；Windows standalone 與 Linux CLI 皆已端到端驗證。**待做**：(1) 下一次 release 後在 .226 與 linux-builder 用 tray 走真實「Install update vX」；(2) release 流程產生 SHA256SUMS 並簽章（目前信任 GitHub asset digest + TLS）；(3) Windows 可對 exe 做 Authenticode 驗證；(4) Linux 附 polkit .policy 讓 pkexec 提示可讀、避免 root 執行使用者目錄腳本。 |
+| **Active (已實作；之後已發多版，系統匣的真實更新還沒有人走過)** | **§SELF-UPDATE** host 自我更新（tray 兩段式 + CLI） | 2026-09-22 實作：HEAD-302 查版、GitHub asset digest 必驗、Windows 腳本兩段式 rename 回滾／Linux apt 路徑；Windows standalone 與 Linux CLI 皆已端到端驗證。**待做**：(1) linux-builder 用 tray 走真實「Install update vX」（.226 在 2026-11-26 已自動從 2.0.278 更新到 2.0.285）；(2) release 流程產生 SHA256SUMS 並簽章（目前信任 GitHub asset digest + TLS）；(3) Windows 可對 exe 做 Authenticode 驗證。 |
 | **Active (儀器已上線，待實測歸因)** | **§INPUT-STALL** 鍵鼠斷續（畫面正常、短暫失控後恢復） | 2026-09-21 兩端全管線儀器化後，合成鍵鼠測試四個量測點皆 0；但使用者真實 session（09-21 19:26 場）client 主迴圈 26 次停頓、每次固定 ≈2016 ms、phase 全為 `SDL_WaitEventTimeout`（卡在 SDL 內部，log 前後無觸發事件），host 四種標記皆 0。v1.5.275 起停頓 ≥300 ms 會抄主執行緒堆疊（dbghelp，SDL3.dll 只解到匯出符號）→ 下次發生對照 `[VIPLE-INPUT-STALL] main thread stack` 定位是 hidapi 列舉／DirectInput／WGI／訊息泵。外部嫌疑：client `AsusIMEService.exe` 崩潰迴圈（LL keyboard hook）、host Steam 被 SC-HID feature 風暴卡 10.7 s／輪。候選修法：client SC 無活動裝置時對 feature request 立即回「無裝置」讓 driver 解除 400 ms 閘控、server N 次未回應後停止轉發；§K.14 開機 IDR 重試改用 per-encoder 計數（reinit 後目前永不再觸發）。 |
 | **Active (已修並驗證，剩後續項)** | **§M01-D** app 被殺後立刻重開必 -101（殭屍 session） | 2026-09-23 修正並驗證：host 在同一個 client（同憑證 uuid）發起新的 /launch 或 /resume 時先終止舊 session 並退役它的 QUIC 連線（`§M01-D superseded` / `retired QUIC connection of superseded session`），pending launch 由同 client 的新 launch 直接取代；client 在 -101 前多印一行 `§M01-D no decodable frame` 診斷。Pixel 5 與 Windows client「強制關閉後 2 秒重開」各 3/3 在 3.5–5.1 秒出畫面、無 -101；QUIC 場次 host 的 `WSASendMsg failed: 10022` 也從每場數十次降到 0。**後續**：(1) 更深一層的「B 線」防護（relay 路徑、較舊 session 不得接手）已做成 patch 未合入（scratchpad `m01\D_bline.patch`），需使用者同意變更 host 管理設定；(2) 同一 NAT IP 後有多個 QUIC client 時每個 IP 只有一條 QuicSession，需要 per-connection 綁定；(3) 語意改變：同一張憑證同時開第二條串流（GUI＋CLI、兩台裝置共用憑證）會把第一條擠掉，2.0 VR 若要同 client 多 session 須回頭檢討；(4) -101 對話框「網路連線品質不佳」的文字是否改寫（Android `values*/strings.xml`、Qt `session.cpp`）|
 | **Active (已修，待有音訊時補驗)** | **§M01-A** debug 版音訊 FEC assert 中止 | 2026-09-23 Pixel 5 debug 版 AudioRecv SIGABRT（`RtpAudioQueue.c` `LC_ASSERT_VT(blockSize 相同)`，前一行 `Audio block size mismatch (got 348, expected 336)`）。已把 `RtpAudioQueue.c`／`AudioStream.c` 對網路輸入的 assert 改成 runtime 防衛（行為對齊 release：丟棄該 block、不 abort），log `[VIPLE-AUDIO] §M01-A …`。驗證那輪 host 沒有音訊流量（遊戲崩潰、靜態桌面），**修正尚未在實機上被觸發**：下次 host 有遊戲音訊時，用 Pixel 5 debug 版做斷線恢復再確認 0 次 abort |
@@ -36,14 +36,43 @@
 | **Medium** | **§K.2** Raspberry Pi 5 client (aarch64) | aarch64 建置阻斷已隨 §VR M2a 解掉（樹莓派 5 現在是 arm64 原生建置機）；Pi 5 當串流 client 本身沒有驗過（待核對）；FRUC 全 disable |
 | **Low** | **§J.3.e.Y 4Y.5b** native RIFE activation | 256×256 chain +1.7ms 負收益，revert；重做要先解 §β.5.3 D 全套 |
 | **Low** | **§H.4-perf** VkFrucRenderer AMD draw-time | m_FrucMode=false ~13ms 偏高；需使用者提供 GPU-PROF log 才能精準改 |
-| **Low** | **§A.2 / §A.8** WiX installer / 內部命名 | 沒用 MSI 出貨，優先級極低 |
 | **Low** | **§D** HelpLauncher URL | docs/ 已寫；等 doc site 立起來再換 URL |
-| ❌ **Won't-fix** | **Linux mouse scale** | 使用者明確放棄，維持現狀 |
-| ❌ **Won't-fix** | **NVOF SDK buffer 輸出** | SDK 硬體限制，無法做 buffer 變體 |
 
 ---
 
 ## 各章節待辦補充
+
+### §PERF-R3 待量測（會改時序或輸出，要實機量過才改；依預期效益排序）
+
+- **頭盔**：拿下頭盔滿 1 秒請 host 暫停影像、戴回要 IDR（待機功耗／戴回出畫時間）；姿態上行由顯示率 ×4 降為 ×2（MTP、快速轉頭誤差）；
+  XR session 狀態接 `setXrSessionState`（先確認 Frame 取下時的狀態變化）；全景影片 500 µs 輪詢改等 semaphore。
+- **桌面 client**：串流全程 1 ms 系統計時器改成只給 Pacer／解碼用高精度計時器（節拍抖動、整機功耗）；解碼執行緒 100 µs 輪詢；
+  D3D11 在 NVIDIA／AMD 每幀多拷一張解碼紋理（加 fence 後直接綁解碼 SRV）；GenericFRUC 靜態畫面跳過 ME。
+- **server**：畫面靜止仍照幀率重編（`minimum_fps_target`）；游標混色兩次整幀複製；`/serverinfo` 每次列舉網卡（約 15 ms，改快取＋變更通知）；
+  有 QUIC session 時的 1 ms 輪詢（音訊沒有 wake）；Linux 擷取改事件喚醒。
+- **Android**：解碼輸入少一次 memcpy（JNI 直寫 input buffer）；operating rate；VR 追蹤取樣率；眼鏡 warp 的 `glGetError`（attach 依賴它清旗標）。
+- **common-c（三份同步）**：QUIC 佇列空時不再每 1 ms 空轉（事件叫醒）；多連線重複影像封包不重複解密；封包緩衝池取代每包 malloc；
+  補包決策快取；RTT 穩定時放寬 reliable ping。
+
+### 2026-11-26：省電、喚醒 App、todo 純程式項目、第三輪效能審查（**未提交、未驗**）
+
+- **各機省電**（本機工具，不入 git）：Windows 自己的閒置計時整晚沒觸發 → host 與開發機的守護改成
+  連續 15 分鐘沒工作、沒鍵鼠、沒 power request 就自己 `SetSuspendState`；host 的鍵鼠閒置由使用者工作階段的 `VipleStreamInputIdle` 回報；
+  CachyOS 守護記錄擋住 PowerDevil 的 inhibitor。**待驗**：三台第一次自然睡眠的 log（`sleep:`／`resume:`）。
+  頭盔 11-25 晚的追蹤斷續＝Wi-Fi 睡眠實驗後沒重開機，重開後恢復；**待配戴**再玩一場確認。
+- **喚醒 App 1.1**：醒著／睡著多久、自動補送、全部喚醒、桌面捷徑、快速設定方塊；中繼背景監看。**待做**：裝到 Pixel 9。
+- **todo 的純程式項目**：§LOGDROP-ASYNC（見上方 §LOGDROP）；§ENC-KBPS（AVCodec／PyroWave 回報 `enc=`，非 NVENC 場次建立時重設 `abr_signals`）；
+  §UPDATE-NOFILE（Windows client 更新的提權腳本改用 `-EncodedCommand`，不落地到 %TEMP%；解壓暫存與 zip 副本改放安裝目錄，對副本驗雜湊）。
+  更新腳本已在開發機用假安裝目錄跑過（雜湊對／錯兩種）。**待驗**：真的走一次 client 更新（含 UAC）。
+  核對後不成立：relay log 印出 rikey（`main.cpp` 的 log 出口已遮）、§CTRL-REGAIN 重連後沒重設計時（`ControlStream.c` 已重設）。
+- **使用者 log 分析（11-25 晚～11-26 早，VITURE＋5070 Ti 那組 9 場；報告 `temp/logdrop_1126/out_go.md`，opencode deepseek）**：
+  VR 主線乾淨（loss 0、延遲 p50 12～13 ms）。已修：Android 音訊積壓每包一行 log 改 10 秒彙總、新安裝不再開不存在的舊資料庫（三段 SQLite 堆疊）。
+  **待處理**：(1) Beast 停在 2D 面板時開串流前空等 11～14 秒（不能送 SET_DISPLAY_MODE，會黑屏）——改成串流前先檢查並提示、加倒數，事件 log 記按鍵時刻；
+  (2) 3840x1080 VR 場被 `cut-trend` 從約 8.3 Mbps 砍到 6.7～7.1（rtt 6 ms、base 1 ms、jit 5 ms）——先核對這場的碼率為何只有 8 Mbps、base 太小時要不要設下限；
+  (3) 連開兩場時 `[VIPLE-VR-IPC] driver-hung heartbeat=stale` 拆橋（SteamVR 重啟中），開場寬限；(4) 開場 `rejected reason=image expected=<none>` 是 Warning＋退避，應降級；
+  (5) driver 轉印 log 把 `[` 換成 `?`（防偽造），tag 變成 `?VIPLE-VR-STALE]` 不好搜——改換成別的字元或保留 tag；(6) logdrop 檔頭的 duration／display_mode 與內容不符、server 上傳整份累積 log；
+  (7) `code=16`（OpenXR runtime 不在 SteamVR 下）client 沒有對應文案。
+- **§PERF-R3 第三輪效能／功耗審查**：grok 四份報告（server、桌面 client、Android、頭盔 VR）逐項核實：不改行為的已改進 2.0.286（各處標 `§PERF-R3`）；會改時序的列在下一節待量測。
 
 ### §QUEST Meta Quest 原生 OpenXR client（2026-11-24 開工；**OpenXR 那一端沒有實機、從未執行**）
 
@@ -73,7 +102,7 @@
   **待配戴**：在一般的輸入框按「中/英」後實際打字確認；全螢幕遊戲內讀不到狀態時的退路。Linux／macOS host 不處理（清掉位元照舊注入）；
   Android 那份 common-c 只同步標頭。
 
-### 2026-11-21 上午：外部模型細部審查與修正（2.0.263，**未經無人驗證**；host 仍是 2.0.260）
+### 2026-11-21 上午：外部模型細部審查與修正（2.0.263；11-22 回歸框架已驗大部分，見「2026-11-22 凌晨」一節）
 
 審查由 agy（Neon）、grok、opencode 做，修正由 grok 做，逐項看過 diff；報告在本機 `temp/review_1121/`。Windows 兩件與頭盔版建得過，
 單元測試 41＋81 項（含新增 2 項）全過，client `--help` 兩次 rc=0。**下列都要等 host 可以用才驗得到實際行為**：
@@ -242,7 +271,7 @@
   - NVENC 改幀率的路徑（被動補幀調整才會走）、Steam Controller 停用重試（要實體手把）、§VR-EDGE-HOLD、跨磁碟區移動與外接儲存，今晚驗不到。
 - **需設計（成立、沒動）**，細節在各批 `fix/*.md` 的「需設計的項目」：`vrApiReady` 與刪 mutex 之間的窗口（要改 `Platform.c` 的計數或加 in-flight 計數）；追蹤走 ENet 時每筆配置＋持鎖；控制通道沒有重放視窗；`sendC2S` 整段持鎖；xrvideo 繪製失敗仍 release；relay proxy 的 XML 沒有憑證驗證、`relaylookup.cpp` 不驗憑證又把 rikey 寫進 log；刪除主機時不等其他任務；Windows 更新程式的提權腳本放在 %TEMP%；`relayPsk` 明文存在設定裡；定位失敗時沿用上一筆頭位。
 - **§STREAM-MENU（新功能，server）**：2D 串流期間，遠端點開始選單的電源圖示、或在桌面按 Alt+F4，不出現 Windows 的電源選單，改顯示 host 畫的「串流控制」選單（中斷串流、結束 App 並中斷、鎖定、睡眠、關機、重新啟動、取消）。設定 `stream_menu`（預設開）。另有每 300 ms 的保險，看到「關閉 Windows」對話框就取消它。
-  **還沒測**：鎖定、睡眠、關機、重新啟動、保險那條（本機叫出對話框）、選單的鍵盤操作、英文介面。Ctrl+Alt+Del 畫面不處理（安全桌面）。web UI 設定頁還沒有這個選項。
+  **還沒測**：鎖定、睡眠、關機、重新啟動、保險那條（本機叫出對話框）、選單的鍵盤操作、英文介面。Ctrl+Alt+Del 畫面不處理（安全桌面）。
 - **頭盔電源鍵（另一件事，還沒做）**：頭盔上 `steamos-powerbuttond` 讀 `/dev/input/event0`，一般使用者可以 `EVIOCGRAB` 獨占（實測成功）、Flatpak 有 `devices=all`，所以串流期間把頭盔電源鍵長按換成串流選單是做得到的；短按要不要保留睡眠、怎麼把按鍵還給 Steam 還沒定。
 
 ### 2026-11-18 深夜：影片模式檔案管理、選取狀態、熱點加入、server 設定頁（client 2.0.234／server 2.0.233，已提交 v2.0.234）
@@ -402,9 +431,6 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
 
 **建置狀態（2026-11-14）**
 - macOS 的 server 沒有建置機，改到的共用檔先靠 Linux 那一次把關。
-- `scripts/check/xr_guard_scan.py` 回報 5 筆沒有守衛的 XR 型別（`moonlight-qt/app/main.cpp` 的 `XrContext::setHandBackOnShutdown` 一筆、
-  `streaming/player/playersession.cpp` 四筆）。HEAD 就有、不是這一輪改出來的；5 筆都在 `HAVE_VR_PLAYER` 之內（`app.pro` 只在有 OpenXR 的
-  Linux 建置才定義），Windows client 實際建置通過，是掃描工具不認得這個巨集。
 
 **待驗（細節與預期的 log 在總表每一列）**
 - **上頭盔之前先在開發機做**：A25（注視點分塊邊緣漸層的色彩換算）與 A39（分塊取樣座標改由頂點屬性內插）改的是 PCVR 預設每格都跑的那一趟。模擬頭盔、注視點「小」，`--xr-dump-frame` 改前改後比整張：亮度相同、每通道差 ≤1／255、上排逐位元相同；client log 要有 `tiles: sampling positions come from vertex attributes`。萬一畫面上下顛倒或兩排對調，把 `xrvideo.h` 的 `m_TilesVaFailed` 初值改成 true 就整個關掉 A39。
@@ -417,7 +443,6 @@ VR 的 [VIPLE-VR-LAT10] 與 §ABR-SHORTFALL 只在 VR session 生效；2D 走另
 - **Android 手機**：A17（冷啟動沒有 `VIPLE-VK-PROBE`、開 Vulkan 補幀時仍有）、A20（靜置 60 秒每台主機只有一次 `[VIPLE-PCLIST] shortcut confirmed`、沒有 `saved`；`dumpsys shortcut` 三種情況）、A37（GLES 與 Vulkan 補幀三個品質等級都編得過）、A22 的 Android 那一半（要手機＋Tailscale）。
 
 **做了一半、刻意延後或要人決定的**
-- A15 的另一半：`Sunshine/src/video.cpp` 的 AVCodec／PyroWave 路徑沒有回報實際碼率，這兩種編碼器的 VR 場次 10 秒行顯示 `enc=-`（host 的 VR 都是 NVENC，實際場次不受影響）。
 - A21 的另一半：設定頁 VR 區包進 `Loader { active: VrLauncher.available }` 沒做（會動到頭盔上那一頁的焦點邏輯，要能實際操作才做），建議和「2D 專用區塊包進 Loader」同一輪。
 - A10 延後的三件：佔位圖判斷搬到 C++ 之後再設 `sourceSize`、封面快取改存原始位元組、XrShell 自己的 incubation controller。
 - 能建置、能跑一場之後再考慮的選做：A8「前 8 幀剛回應過請求就不送 §K.14 重送」、A18「VR 擷取用啟動時存的 adapter LUID」（服務重開後第 1、2 場也能命中快取）、A9 改用 `NtQuerySystemInformation`、A13 的 macOS、A14 的時間戳與 formatter 快取、A45「行程內記住可用的 OpenXR API 版本」。
@@ -849,11 +874,12 @@ lazy fetch 兩條路徑都已接 ModelFetcher（見總覽 §SLIM）。還沒做�
 - §VR-ABR-RESTORE-STEP 與 §VR-ABR-CUT-NO-RAISE 改的是 VR 碼率控制核心，需要配戴確認體感。
 - `scripts/rps.sh`：腳本超過約 2 KB 時遠端回「命令列太長」而且不執行（host 探測因此一直是空的）；已改成長腳本走 stdin。
 
-### §LOGDROP 匿名 log 收集（2026-11-25，未提交）
+### §LOGDROP 匿名 log 收集（2026-11-25，v2.0.278 已提交）
 收件端 `tools/logdrop/Code.gs`（Apps Script → 使用者雲端硬碟），同意制＋匿名安裝 ID。已做：Android 眼鏡（首次詢問、設定頁開關、診斷完成與眼鏡串流結束自動上傳、診斷頁「立即上傳」）、server（`log_upload=ask|enabled|disabled`、首頁詢問卡、疑難排解頁、串流結束與異常結束後自動上傳）。
 - 已驗：Pixel 5 首次詢問／設定頁／診斷自動上傳（遮罩讀回確認）；host 2.0.278 的 upload-status、consent、手動上傳、串流結束自動上傳。
 - 未驗：server 首頁詢問卡與疑難排解頁的畫面、異常結束（`crash`）觸發、眼鏡串流結束（要眼鏡）、Linux server。
-- 待做：其他平台（Windows／Linux client、Steam Frame、Android 一般串流）；server 手動上傳期間整個網頁介面會卡住（confighttp 只有一條 io 執行緒），改成非同步。
+- 待做：其他平台（Windows／Linux client、Steam Frame、Android 一般串流）。
+- 2026-11-26 §LOGDROP-ASYNC：手動上傳改在背景執行緒、完成才回應（網頁介面不再卡住；重複按回 busy）。**未驗**：host 上實際按一次。
 
 ## 鐵律（任何改動都不能破壞）
 

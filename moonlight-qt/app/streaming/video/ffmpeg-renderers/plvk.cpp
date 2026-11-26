@@ -6362,10 +6362,13 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
 
     // Reserve enough space to avoid allocating under the overlay lock
     pl_overlay_part overlayParts[Overlay::OverlayMax] = {};
-    std::vector<pl_tex> texturesToDestroy;
-    std::vector<pl_overlay> overlays;
-    texturesToDestroy.reserve(Overlay::OverlayMax);
-    overlays.reserve(Overlay::OverlayMax);
+    // §PERF-R3（2026-11-26）：原本是兩條 std::vector＋reserve，每幀兩次堆積配置／釋放（沒有 overlay 也一樣）。
+    // 上限固定且很小，改用堆疊陣列。每個槽同一幀最多丟兩張紋理（舊的被 staging 取代＋剛換上的又被關掉），
+    // 原本 reserve(OverlayMax) 遇到這種情況還會在 overlay 鎖裡重新配置，這裡直接留 2 倍
+    pl_tex texturesToDestroy[Overlay::OverlayMax * 2] = {};
+    int texturesToDestroyCount = 0;
+    pl_overlay overlays[Overlay::OverlayMax] = {};
+    int overlayCount = 0;
 
     pl_frame_from_swapchain(&targetFrame, &m_SwapchainFrame);
 
@@ -6375,7 +6378,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         // If we have a staging overlay, we need to transfer ownership to us
         if (m_Overlays[i].hasStagingOverlay) {
             if (m_Overlays[i].hasOverlay) {
-                texturesToDestroy.push_back(m_Overlays[i].overlay.tex);
+                texturesToDestroy[texturesToDestroyCount++] = m_Overlays[i].overlay.tex;
             }
 
             // Copy the overlay fields from the staging area
@@ -6389,7 +6392,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
 
         // If we have an overlay but it's been disabled, free the overlay texture
         if (m_Overlays[i].hasOverlay && !Session::get()->getOverlayManager().isOverlayEnabled((Overlay::OverlayType)i)) {
-            texturesToDestroy.push_back(m_Overlays[i].overlay.tex);
+            texturesToDestroy[texturesToDestroyCount++] = m_Overlays[i].overlay.tex;
             SDL_zero(m_Overlays[i].overlay);
             m_Overlays[i].hasOverlay = false;
         }
@@ -6414,7 +6417,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
             m_Overlays[i].overlay.parts = &overlayParts[i];
             m_Overlays[i].overlay.num_parts = 1;
 
-            overlays.push_back(m_Overlays[i].overlay);
+            overlays[overlayCount++] = m_Overlays[i].overlay;
         }
     }
     SDL_AtomicUnlock(&m_OverlayLock);
@@ -6440,8 +6443,8 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     targetFrame.crop.y1 = dst.y + dst.h;
 
     // Render the video image and overlays into the swapchain buffer
-    targetFrame.num_overlays = (int)overlays.size();
-    targetFrame.overlays = overlays.data();
+    targetFrame.num_overlays = overlayCount;
+    targetFrame.overlays = overlays;  // §PERF-R3：num_overlays 為 0 時 libplacebo 不讀這個指標
 
     // §J.3.e.2.e1b — when VIPLE_VK_FRUC_OUTPUT_OVERRIDE=1 and our pl_tex /
     // override resources are ready, run forward+reverse compute every frame
@@ -6633,8 +6636,8 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
 
 UnmapExit:
     // Delete any textures that need to be destroyed
-    for (pl_tex& texture : texturesToDestroy) {
-        pl_tex_destroy(m_Vulkan->gpu, &texture);
+    for (int t = 0; t < texturesToDestroyCount; t++) {
+        pl_tex_destroy(m_Vulkan->gpu, &texturesToDestroy[t]);
     }
 
     pl_unmap_avframe(m_Vulkan->gpu, &mappedFrame);

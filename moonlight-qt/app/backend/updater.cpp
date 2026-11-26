@@ -681,12 +681,7 @@ bool Updater::spawnHelperAndQuit()
     QString exePath    = QCoreApplication::applicationFilePath();
     qint64  pid        = QCoreApplication::applicationPid();
 
-    // Write helper PS1 to temp（和下載的檔案放同一個隨機名稱的暫存目錄）
-    QString tempRoot   = m_StageDir.isEmpty() ? QStandardPaths::writableLocation(QStandardPaths::TempLocation) : m_StageDir;
-    QString helperPath = QDir(tempRoot).filePath(QStringLiteral("viplestream_update_%1.ps1").arg(m_Version));
-
-    // PowerShell 跳過 ExecutionPolicy + 隱藏視窗的標準呼叫慣例
-    // ($PSScriptRoot 在 -File 模式下可用，這裡用絕對路徑所以不需要)
+    // 下面的腳本以 -EncodedCommand 執行（見 §UPDATE-NOFILE），不寫檔
     // §REVIEW-1104：目錄要提權時，覆寫仍由已提高權限的 PowerShell 做；重開 exe 改經未提權的 explorer（Shell.Application），避免新行程維持系統管理員。COM 失敗才退回 Start-Process，避免更新好了卻沒有行程再開
     QString script = QStringLiteral(
         "param([int]$AppPid,[string]$ZipPath,[string]$InstallDir,[string]$ExePath,[int]$DropAdmin,[string]$Sha256,[string]$Version)\n"
@@ -703,9 +698,16 @@ bool Updater::spawnHelperAndQuit()
         // 解到一半磁碟滿時，安裝目錄已經新舊混雜，而且腳本就此結束、不會再把程式打開。
         // 現在解壓失敗時安裝目錄沒有動過，照樣把（舊的）程式開回來。
         "$ok = $true\n"
-        "$stage = Join-Path ([IO.Path]::GetTempPath()) ('viplestream_stage_' + $AppPid)\n"
+        // §UPDATE-NOFILE（2026-11-26）：解壓暫存目錄與 zip 副本放在安裝目錄裡。原本 stage 在使用者的 %TEMP%、zip 驗完雜湊後
+        // 再從原處解壓：提權時這兩處同一個使用者的程式都改得到（驗完才換 zip、解壓後覆蓋前換檔），換進去的檔案會由
+        // 已提權的行程複製到 Program Files。需要提權＝安裝目錄只有系統管理員能寫，所以先把 zip 複製進來、對副本驗雜湊再解。
+        "$stage = Join-Path $InstallDir ('.viple_update_' + $AppPid)\n"
+        "$zipCopy = $stage + '.zip'\n"
+        "$ZipPathOrig = $ZipPath\n"
         "try {\n"
-        // §UPDATE-DIGEST：解壓前再核對一次。程式驗完到這裡（可能已提權）之間，暫存檔有可能被換掉。
+        "  Copy-Item -LiteralPath $ZipPathOrig -Destination $zipCopy -Force\n"
+        "  $ZipPath = $zipCopy\n"
+        // §UPDATE-DIGEST：解壓前再核對一次（對安裝目錄裡的副本）。
         // 用 .NET 算，不用 Get-FileHash：模組路徑被別的 PowerShell 版本帶歪時，5.1 會找不到那個 cmdlet
         "  if ($Sha256) {\n"
         "    $fs = [IO.File]::OpenRead($ZipPath)\n"
@@ -755,6 +757,8 @@ bool Updater::spawnHelperAndQuit()
         "  $ok = $false\n"
         "}\n"
         "Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue\n"
+        "Remove-Item -LiteralPath $zipCopy -Force -ErrorAction SilentlyContinue\n"
+        "$ZipPath = $ZipPathOrig\n"
         "Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue\n"
         "$sd = Split-Path -Parent $ZipPath\n"
         "if ((Split-Path -Leaf $sd) -like 'viplestream-update-*') { Remove-Item -LiteralPath $sd -Recurse -Force -ErrorAction SilentlyContinue }\n"
@@ -783,48 +787,34 @@ bool Updater::spawnHelperAndQuit()
     failMsg.replace(QStringLiteral("'"), QStringLiteral("''"));
     script.replace(QStringLiteral("__FAIL_MSG__"), failMsg);
 
-    QFile sf(helperPath);
-    if (!sf.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        fail(tr("Cannot write helper script: %1").arg(sf.errorString()));
-        return false;
-    }
-    // §REVIEW-1104：加 UTF-8 BOM，Windows PowerShell 5.1 才不會把翻譯後的提示文字當 ANSI 讀成亂碼
-    // §REVIEW-1118：磁碟滿時 write 會少寫。原本不看回傳值，提權後跑的是半截腳本，程式也已經關了。
-    const QByteArray scriptBytes = script.toUtf8();
-    if (sf.write("\xEF\xBB\xBF", 3) != 3 || sf.write(scriptBytes) != scriptBytes.size() || !sf.flush()) {
-        const QString err = sf.errorString();
-        sf.close();
-        QFile::remove(helperPath);
-        fail(tr("Cannot write helper script: %1").arg(err));
-        return false;
-    }
-    sf.close();
-
     bool needElevate = !isPathWritable(installDir);
     qDebug() << "[VIPLE-UPDATE] install dir" << redactHomePath(installDir)
              << "writable =" << !needElevate;
 
-    // 構造 PowerShell argv：-NoProfile -ExecutionPolicy Bypass -File <script> -AppPid ... -ZipPath ...
-    // §REVIEW-1119：連續 .arg() 會把路徑裡的 %2～%8 再換一次。八個參數一次代入就不會。
-    // 路徑以單一反斜線結尾時（磁碟根目錄 D:\），CommandLineToArgvW 會把 \" 當成跳脫的引號。
-    const auto nativeArg = [](QString path) {
-        path = QDir::toNativeSeparators(path);
-        if (path.endsWith(QLatin1Char('\\'))) {
-            path.append(QLatin1Char('\\'));
-        }
-        return path;
+    // §UPDATE-NOFILE（2026-11-26）：腳本不再寫到 %TEMP% 再用 -File 執行。那個檔案在「寫完」到「提權後的 PowerShell 讀它」
+    // 之間，同一個使用者的任何程式都能把它換掉，換成的內容會以系統管理員權限執行。改成整段（連同參數）用
+    // -EncodedCommand（UTF-16LE＋base64）放在命令列：沒有落地的檔案可換，UTF-16 也不必再加 BOM 避免 5.1 讀成 ANSI。
+    // 參數一律用 PowerShell 單引號字串（' 寫成 ''），路徑裡的 $、`、空白都不會被解讀。
+    // 腳本約 6 千字元，編碼後約 1.6 萬，遠低於命令列 32767 字元的上限。
+    const auto psQuote = [](QString v) {
+        v = QDir::toNativeSeparators(v);
+        v.replace(QStringLiteral("'"), QStringLiteral("''"));
+        return QStringLiteral("'") + v + QStringLiteral("'");
     };
-    QString args = QStringLiteral(
-        "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden "
-        "-File \"%1\" -AppPid %2 -ZipPath \"%3\" -InstallDir \"%4\" -ExePath \"%5\" -DropAdmin %6 -Sha256 %7 -Version \"%8\""
-    ).arg(nativeArg(helperPath),
-          QString::number(pid),
-          nativeArg(m_DownloadPath),
-          nativeArg(installDir),
-          nativeArg(exePath),
-          QString::number(needElevate ? 1 : 0),
-          m_AssetSha256,
-          m_Version);
+    const QString command = QStringLiteral("& {\n") + script + QStringLiteral("\n} -AppPid ") + QString::number(pid)
+            + QStringLiteral(" -ZipPath ") + psQuote(m_DownloadPath)
+            + QStringLiteral(" -InstallDir ") + psQuote(installDir)
+            + QStringLiteral(" -ExePath ") + psQuote(exePath)
+            + QStringLiteral(" -DropAdmin ") + QString::number(needElevate ? 1 : 0)
+            + QStringLiteral(" -Sha256 ") + psQuote(m_AssetSha256)
+            + QStringLiteral(" -Version ") + psQuote(m_Version);
+    const QByteArray utf16(reinterpret_cast<const char*>(command.utf16()), command.size() * 2);
+    const QString args = QStringLiteral("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ")
+            + QString::fromLatin1(utf16.toBase64());
+    if (args.size() > 32000) {
+        fail(tr("Failed to launch updater (UAC denied or PowerShell missing)."));
+        return false;
+    }
 
     // §REVIEW-1111（第二輪）：用系統目錄裡的 PowerShell 的完整路徑。只給檔名時會照 PATH 找，提權執行到的可能是別人放的同名程式。
     // §REVIEW-1119：找不到完整路徑就放棄。退回 "powershell.exe" 仍會被目錄或 PATH 劫持。

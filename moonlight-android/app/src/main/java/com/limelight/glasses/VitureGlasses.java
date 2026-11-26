@@ -498,9 +498,10 @@ public final class VitureGlasses {
                 count = scratch.length;
             }
             if (count > 0) {
-                for (int i = 0; i < count; i++) {
-                    scratch[i] = slot.buffer.get(i);
-                }
+                // §PERF-R3（2026-11-26）：原本逐位元組 get(i)（240 包／秒 × 每包數十次邊界檢查），
+                // 改成 flip 後一次批次複製；下面本來就會 clear()，position／limit 會被重設，內容一樣。
+                slot.buffer.flip();
+                slot.buffer.get(scratch, 0, count);
                 handleFrame(scratch, count, System.nanoTime());
             }
             slot.buffer.clear();

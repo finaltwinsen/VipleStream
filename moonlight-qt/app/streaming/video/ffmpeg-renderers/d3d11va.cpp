@@ -14,6 +14,8 @@
 #include <dwmapi.h>
 #include <direct.h>  // §B-DUMP-D3D11: _mkdir for dump directory tree
 #include <chrono>
+#include <algorithm>         // §PERF-R3（2026-11-26）：std::nth_element
+#include <initializer_list>
 
 // §B-DUMP-D3D11: stb_image_write for BMP output (matching VkFruc §B-DUMP).
 // IMPLEMENTATION already defined by vkfruc.cpp's TU; here we just use the
@@ -1213,8 +1215,11 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
         }
     }
     // §VR：VR session 不做 FRUC（幀與 0x81 pose 一一對應，補幀會破壞配對）
+    // §PERF-R3（2026-11-26）：補幀關閉時這行每幀都會評到；get() 每次拿一次全域讀寫鎖。
+    // 偏好設定物件是行程內唯一、建立後不釋放的單例，指標存一次即可；欄位仍每幀即時讀，行為不變
+    static StreamingPreferences* const s_Prefs = StreamingPreferences::get(nullptr);
     if (!m_FRUC && !m_GenericFRUC && !m_FRUCInitFailed
-        && StreamingPreferences::get(nullptr)->enableFrameInterpolation
+        && s_Prefs->enableFrameInterpolation
         && !(LiGetVrFlags() & VIPLE_VR_SF_ENABLED)) {
         // v1.3.40: 1080p hard floor 移除（使用者明確要求）。
         // 過去把 streamW>=1920 && streamH>=1080 當成「FRUC 至少 1080p」
@@ -1582,8 +1587,23 @@ void D3D11VARenderer::renderFrame(AVFrame* frame)
                             "[VIPLE-PRESENT-Stats] %s n=0", label);
                 return;
             }
-            std::sort(b.intervalMs.begin(), b.intervalMs.end());
-            std::sort(b.callLatMs.begin(), b.callLatMs.end());
+            // §PERF-R3（2026-11-26）：只用到幾個百分位，不必整段排序。由小到大依序 nth_element，
+            // 每次只處理上一個位置之後的區段，取到的值與完整排序相同；O(n log n) → O(n)，
+            // 每 5 秒在繪製執行緒上少做一次排序。下面的加總與順序無關（只差最後一位的浮點捨入）
+            auto selectPct = [](std::vector<double>& s, std::initializer_list<double> ps) {
+                size_t from = 0;
+                for (double p : ps) {
+                    if (s.empty()) return;
+                    size_t idx = (size_t)(p * s.size());
+                    if (idx >= s.size()) idx = s.size() - 1;
+                    if (idx >= from) {
+                        std::nth_element(s.begin() + from, s.begin() + idx, s.end());
+                        from = idx + 1;
+                    }
+                }
+            };
+            selectPct(b.intervalMs, { 0.50, 0.95, 0.99, 0.999 });
+            selectPct(b.callLatMs, { 0.95 });
             const size_t n = b.intervalMs.size();
             double intSum = 0; for (auto v : b.intervalMs) intSum += v;
             double callSum = 0; for (auto v : b.callLatMs)  callSum += v;

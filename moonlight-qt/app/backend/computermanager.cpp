@@ -72,6 +72,15 @@ public:
         m_WakeCondition.wakeAll();   // also interrupts any in-progress slow sleep
     }
 
+    // §PERF-R3（2026-11-26）：ComputerPollingEntry::interrupt() 在 requestInterruption() 之後呼叫，
+    // 叫醒正在等輪詢間隔的這條執行緒。有了它，下面的等待就不必切成 1 秒一段只為了發現 interruption。
+    // 先設旗標、再在同一把鎖下 wakeAll：執行緒要嘛還沒進 wait（會看到旗標）、要嘛已在 wait（會被叫醒）。
+    void wakeForInterruption()
+    {
+        QMutexLocker locker(&m_WakeMutex);
+        m_WakeCondition.wakeAll();
+    }
+
 private:
     // §LAN-PREF（2026-11-08）：目前用的位址是 VPN（Tailscale 的 100.64.0.0/10）而 host 有廣告區網位址時，每 15 秒探一次區網：
     // 400 ms 內 TCP 連得上就用它輪詢，成功的話 activeAddress 換成區網位址（之後串流、/launch、/cancel 都走區網）。
@@ -564,8 +573,8 @@ private:
             // QWaitCondition replaces the previous 30×100 ms busy-poll
             // (FIXME-noted in the original code).  We wake on either
             // notifyExplicitWake() (explicit user "Wake PC") or — via
-            // the 1 s chunked timeout — on requestInterruption() at
-            // shutdown.  QThread::requestInterruption is non-virtual so
+            // wakeForInterruption()（§PERF-R3，原本靠 1 秒一段的逾時）— on
+            // requestInterruption() at shutdown.  QThread::requestInterruption is non-virtual so
             // we can't override it from ComputerPollingEntry's QThread*
             // pointer; chunking caps shutdown latency at ~1 s while
             // still letting a 60 s sleep be one ~no-op cv wait the rest
@@ -581,7 +590,10 @@ private:
                         break;
                     }
                     unsigned long remaining = (unsigned long)(deadlineMs - nowChunk);
-                    unsigned long chunkMs = remaining < 1000 ? remaining : 1000;
+                    // §PERF-R3（2026-11-26）：原本切成 1 秒一段，只為了每秒看一次 isInterruptionRequested()；
+                    // 離線 60 秒間隔時每台主機每分鐘白醒 59 次。現在 interrupt() 會透過 wakeForInterruption()
+                    // 叫醒，直接睡到期限（迴圈保留，處理 spurious wakeup 與三個結束條件）。
+                    unsigned long chunkMs = remaining;
                     // wait() returns true iff signaled before timeout.
                     if (m_WakeCondition.wait(&m_WakeMutex, chunkMs)) {
                         wokenByCv = true;
@@ -604,6 +616,15 @@ private:
     QMutex m_WakeMutex;
     QWaitCondition m_WakeCondition;
 };
+
+// §PERF-R3（2026-11-26）：見 computermanager.h 的宣告
+void computerPollingWakeThread(QThread* thread)
+{
+    PcMonitorThread* monitor = qobject_cast<PcMonitorThread*>(thread);
+    if (monitor != nullptr) {
+        monitor->wakeForInterruption();
+    }
+}
 
 ComputerManager::ComputerManager(StreamingPreferences* prefs)
     : m_Prefs(prefs),

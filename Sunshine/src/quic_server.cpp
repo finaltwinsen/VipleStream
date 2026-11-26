@@ -2104,6 +2104,8 @@ namespace quic_server {
 
     _running.store(false);
     _statsRunning.store(false);
+    // §PERF-R3（2026-11-26）：IO 執行緒在沒有 session 時一次最多睡 50 ms，叫醒它馬上看到 _running＝false（關閉時間與原本相同）
+    wake();
 
     if (_ioThread.joinable())
       _ioThread.join();
@@ -2371,6 +2373,24 @@ namespace quic_server {
       fd_set readSet;
       struct timeval tv{};
       tv.tv_usec = 1000;
+      // §PERF-R3（2026-11-26）：還沒有任何 session（client 沒走 QUIC、或連線還在握手）時沒有人會往 _pendingQueue 推資料，
+      // 1 ms 輪詢只是空轉（串流期間每秒約 1000 次喚醒）。這時改睡到 picoquic 自己的下一個計時器（握手重傳、閒置逾時等），
+      // 最長 50 ms；收到封包 select 本來就立刻返回，stop() 也會 wake()。picoquic 要求的延遲不到 1 ms 時維持原本的 1 ms，
+      // 不會比原本更頻繁。有 session 時完全照舊（送出的時序不變）。只在喚醒 socket 可用時才這樣做（stop() 靠它叫醒）。
+      if (wakeSock != INVALID_SOCKET) {
+        bool noSessions;
+        {
+          std::lock_guard<std::mutex> lock(_sessionMutex);
+          noSessions = _sessions.empty();
+        }
+        if (noSessions) {
+          const int64_t delayUs = picoquic_get_next_wake_delay(_quic, currentTime, 50000);
+          if (delayUs > 1000) {
+            tv.tv_sec = 0;
+            tv.tv_usec = (decltype(tv.tv_usec)) std::min<int64_t>(delayUs, 50000);
+          }
+        }
+      }
       FD_ZERO(&readSet);
       FD_SET(sock, &readSet);
       // §PERF-1113：喚醒 socket 一起等（Windows 的 select 不看第一個參數；其他平台要給最大的描述元＋1）

@@ -3889,6 +3889,20 @@ void FFmpegVideoDecoder::writeBuffer(PLENTRY entry, int& offset)
     // §REVIEW-1119：SPS 修正會把同一段再送進 h264bitstream，它會另外配置一份約 3/4 大小。
     // 正常 SPS 只有幾百位元組。超過 4096 就照原樣複製，避免超大 SPS 把解析緩衝區拉大，
     // 也避開 write_nal_unit 的 size*3/4 有號乘法。h264_new 失敗回空指標時不要再解析或釋放。
+    // §PERF-R3（2026-11-26）：跟上一次修正過的 SPS 逐位元組相同，就直接貼上次的修正結果（修正只看輸入位元組，
+    // 結果必然相同）。放得下的條件沿用下面的 fixupFits（不放寬），放不下時退回原本路徑（它會原樣複製）
+    if (m_NeedsSpsFixup && entry->bufferType == BUFFER_TYPE_SPS &&
+            entry->length >= 5 && entry->length <= 4096 &&
+            !m_SpsFixupOut.isEmpty() && m_SpsFixupIn.size() == entry->length &&
+            memcmp(m_SpsFixupIn.constData(), entry->data, (size_t)entry->length) == 0 &&
+            (int64_t)offset + entry->length + MAX_SPS_EXTRA_SIZE <=
+                (int64_t)m_PktBufPoolSize - AV_INPUT_BUFFER_PADDING_SIZE &&
+            (int64_t)offset + m_SpsFixupOut.size() <=
+                (int64_t)m_PktBufPoolSize - AV_INPUT_BUFFER_PADDING_SIZE) {
+        memcpy(&m_Pkt->buf->data[offset], m_SpsFixupOut.constData(), (size_t)m_SpsFixupOut.size());
+        offset += (int)m_SpsFixupOut.size();
+        return;
+    }
     if (m_NeedsSpsFixup && entry->bufferType == BUFFER_TYPE_SPS &&
             entry->length >= 5 && entry->length <= 4096) {
         h264_stream_t* stream = h264_new();
@@ -3941,6 +3955,10 @@ void FFmpegVideoDecoder::writeBuffer(PLENTRY entry, int& offset)
                 memcpy(&m_Pkt->buf->data[initialOffset], entry->data, nalStart);
                 offset += nalStart;
                 spsFixed = true;
+
+                // §PERF-R3（2026-11-26）：記下這份輸入與修正後的完整輸出（[initialOffset, offset)），下一個相同的 SPS 直接貼
+                m_SpsFixupIn = QByteArray(entry->data, entry->length);
+                m_SpsFixupOut = QByteArray((const char*)&m_Pkt->buf->data[initialOffset], offset - initialOffset);
             }
         }
         }

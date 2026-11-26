@@ -520,20 +520,6 @@ bool QxrVideo::importLatched(void* image) {
         return false;
     }
 
-    VkAndroidHardwareBufferFormatPropertiesANDROID formatProps{};
-    formatProps.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID;
-    VkAndroidHardwareBufferPropertiesANDROID properties{};
-    properties.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;
-    properties.pNext = &formatProps;
-    const VkResult propResult = getAhbProps(device, buffer, &properties);
-    if (propResult != VK_SUCCESS) {
-        QXR_LOGE("VIDEO", "vkGetAndroidHardwareBufferPropertiesANDROID failed: VkResult=%d", static_cast<int>(propResult));
-        return false;
-    }
-    if (!ensureFormat(&formatProps)) {
-        return false;
-    }
-
     bool hasId = false;
     uint64_t id = 0;
     if (__builtin_available(android 31, *)) {
@@ -546,6 +532,30 @@ bool QxrVideo::importLatched(void* image) {
     } else if (!loggedGetId) {
         loggedGetId = true;
         QXR_LOGI("VIDEO", "AHardwareBuffer_getId unavailable; cache key is pointer+size");
+    }
+
+    // §PERF-R3（2026-11-26）：原本每張解碼幀（72～120 Hz）都先呼叫 vkGetAndroidHardwareBufferPropertiesANDROID
+    // 才查快取。AHB 的 id 在行程內唯一、格式不可變，而 ensureFormat 換格式時會整個 flushCache，
+    // 所以 id 命中的快取項一定是在目前綁定的格式下建的，屬性查詢與 ensureFormat 結果必然相同，可以跳過。
+    // 沒有 id（指標＋尺寸當鍵，指標可能被不同格式的緩衝區重用）時維持原本「先查屬性」的順序。
+    // 下面的 findCache 會再命中同一項，miss 分支（要用到 properties／formatProps）不會走到。
+    const bool knownIdHit = hasId && formatReady && sampler != VK_NULL_HANDLE && pipeline != VK_NULL_HANDLE
+        && findCache(true, id, reinterpret_cast<uintptr_t>(buffer), desc.width, desc.height) != nullptr;
+
+    VkAndroidHardwareBufferFormatPropertiesANDROID formatProps{};
+    formatProps.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID;
+    VkAndroidHardwareBufferPropertiesANDROID properties{};
+    properties.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;
+    properties.pNext = &formatProps;
+    if (!knownIdHit) {
+        const VkResult propResult = getAhbProps(device, buffer, &properties);
+        if (propResult != VK_SUCCESS) {
+            QXR_LOGE("VIDEO", "vkGetAndroidHardwareBufferPropertiesANDROID failed: VkResult=%d", static_cast<int>(propResult));
+            return false;
+        }
+        if (!ensureFormat(&formatProps)) {
+            return false;
+        }
     }
 
     if (CacheEntry* hit = findCache(hasId, id, reinterpret_cast<uintptr_t>(buffer), desc.width, desc.height)) {

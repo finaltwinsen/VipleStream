@@ -252,9 +252,26 @@ public class AndroidAudioRenderer implements AudioRenderer {
             }
         }
         else {
-            LimeLog.info("Too much pending audio data: " + MoonBridge.getPendingAudioDuration() +" ms");
+            // §LOGDROP-1126：原本每個被丟的封包都印一行（一次網路停頓就幾百行，使用者上傳的 log 單檔 348 行）。
+            // 改成第一次立刻印、之後每 10 秒彙總一次：丟了幾包、期間最大積壓。
+            final int pendingMs = MoonBridge.getPendingAudioDuration();
+            final long now = android.os.SystemClock.uptimeMillis();
+            overflowDropped++;
+            overflowMaxMs = Math.max(overflowMaxMs, pendingMs);
+            if (overflowLogAt == 0 || now - overflowLogAt >= 10000) {
+                LimeLog.info("Too much pending audio data: " + pendingMs + " ms (dropped " + overflowDropped
+                        + " packets, max " + overflowMaxMs + " ms since last report)");
+                overflowLogAt = now;
+                overflowDropped = 0;
+                overflowMaxMs = 0;
+            }
         }
     }
+
+    // §LOGDROP-1126：音訊積壓丟包的 log 彙總（只在播放執行緒上讀寫）
+    private long overflowLogAt;
+    private int overflowDropped;
+    private int overflowMaxMs;
 
     @Override
     public void start() {

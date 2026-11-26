@@ -352,7 +352,9 @@ public:
     // ── §VR-SHELL（頭盔 VR 介面）──
     // 任何執行緒：介面畫面（Options.shellWidth×shellHeight；格式用 shellImageFormat() 才不會在 frame thread 轉換）。
     // 圖換了 frame thread 下一格上傳
-    void setShellImage(const QImage& img);
+    // §PERF-R3（2026-11-26）：bottomUp＝列是由下往上排的（glReadPixels 的原樣）。上傳時本來就逐列抄進 staging，
+    // 在那裡倒著抄就好，呼叫端不必先整張翻一次（1280×800 每張省一趟 4 MB 的讀寫）；顯示的像素完全相同
+    void setShellImage(const QImage& img, bool bottomUp = false);
     // 任何執行緒：顯示介面（true）或影像（false，影片模式）
     void setShellActive(bool on) { m_ShellActive.store(on, std::memory_order_release); }
     bool shellActive() const { return m_ShellActive.load(std::memory_order_acquire); }
@@ -411,7 +413,8 @@ private:
     bool ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count, bool* ready, float r, float g, float b,
                          float a = 1.0f);
     // 虛擬鍵盤：把 QImage 經 staging buffer 複製進 swapchain 影像（格式需為 8-bit RGBA／BGRA）
-    bool uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, const QImage& img);
+    // §PERF-R3（2026-11-26）：bottomUp＝來源列由下往上（見 setShellImage），抄進 staging 時倒過來
+    bool uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, const QImage& img, bool bottomUp = false);
     bool createSolidSwapchain(uint32_t w, uint32_t h, XrSwapchain* sc, VkImage** images, uint32_t* count, const char* what);
     // 每一格呼叫一次；視窗滿了就印 10 s 行並回 true。deferPrint＝這一格已經印過 [VIPLE-VR-LDIAG] 那一組：滿了也先不印，
     // 留到下一格（兩組錯開，見 frameThreadMain 的 §VR-LOGSPLIT）
@@ -535,6 +538,7 @@ private:
     std::mutex m_ShellMutex;
     QImage m_ShellImg;                          // m_ShellMutex
     bool m_ShellDirty = false;                  // m_ShellMutex
+    bool m_ShellImgBottomUp = false;            // m_ShellMutex；§PERF-R3（2026-11-26）：m_ShellImg 的列由下往上
     std::atomic<bool> m_ShellActive{false};
     std::atomic<float> m_PendingRefreshHz{-1.0f};  // -1＝沒有新要求
     std::atomic<bool> m_Blank{false};

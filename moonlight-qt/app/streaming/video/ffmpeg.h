@@ -257,6 +257,10 @@ private:
     // transitions for 5s to avoid encoder-reconfig oscillation.
     int m_FpsChangeCooldownSec = 0;
     bool m_NeedsSpsFixup;
+    // §PERF-R3（2026-11-26）：H.264 SPS 修正的結果快取。修正是輸入位元組的確定性函式，
+    // 同一份 SPS（整段逐位元組相同）就直接貼上次的輸出，省掉每個 IDR 的 h264_new／解析／重寫。只在 writeBuffer（送解碼單元的那條執行緒）存取
+    QByteArray m_SpsFixupIn;
+    QByteArray m_SpsFixupOut;
     bool m_TestOnly;
     TestMode m_CurrentTestMode;
     SDL_Thread* m_DecoderThread;

@@ -458,8 +458,22 @@ void Pacer::renderFrame(AVFrame* frame)
                 seq[o] = 0;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-PACER-SEQ] drops=%u %s", (unsigned)m_VideoStats->pacerDroppedFrames, seq);
             }
-            std::sort(m_DiagPaceUs, m_DiagPaceUs + m_DiagN);
-            std::sort(m_DiagRendUs, m_DiagRendUs + m_DiagN);
+            // §PERF-R3（2026-11-26）：只用到 p05／p50／p95 三個順序統計量，不必整段排序。
+            // 由小到大依序 nth_element，每次只處理上一個位置之後的區段（之後的元素都 >= 上一個），
+            // 取到的值與完整排序後同一位置的值完全相同；O(n log n) → O(n)。這兩個陣列之後不再被讀
+            auto selectQuantiles = [this](uint32_t* v) {
+                const double ps[3] = { 0.05, 0.5, 0.95 };
+                size_t from = 0;
+                for (double p : ps) {
+                    const size_t k = (size_t)(p * (m_DiagN - 1));
+                    if (k >= from) {
+                        std::nth_element(v + from, v + k, v + m_DiagN);
+                        from = k + 1;
+                    }
+                }
+            };
+            selectQuantiles(m_DiagPaceUs);
+            selectQuantiles(m_DiagRendUs);
             auto q = [this](const uint32_t* v, double p) { return v[(size_t)(p * (m_DiagN - 1))] / 1000.0; };
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "[VIPLE-PACER10] n=%u pace p05/p50/p95=%.2f/%.2f/%.2f ms rend p05/p50/p95=%.2f/%.2f/%.2f ms | at vsync: empty=%u one=%u more=%u late=%u | display=%d Hz stream=%d fps",

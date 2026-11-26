@@ -289,8 +289,11 @@ namespace audio {
     int mon_tries = 0;  // 連續因異常重建擷取的次數（擷取拿到聲音就歸零）
     bool mon_reported = false;  // 已經通知 client stalled
 
+    // §PERF-R3（2026-11-26）：緩衝放到迴圈外。主機沒出聲（沒有 CONTINUOUS_AUDIO）時 sample() 每個裝置週期逾時一次，
+    // 原本每次都配置並清零一塊、逾時就丟掉；現在逾時的那一塊留給下一輪。送出去（move 進佇列）之後下一輪 resize 會重新配置，
+    // 與原本相同。內容不受影響：各平台的 sample() 回 ok 時整塊覆寫，逾時的內容本來就不用。
+    std::vector<float> sample_buffer;
     while (!shutdown_event->peek()) {
-      std::vector<float> sample_buffer;
       sample_buffer.resize(samples_per_frame);
 
       auto status = mic->sample(sample_buffer);

@@ -55,6 +55,9 @@ private:
     std::thread thread;
     std::atomic<bool> running{false};
     bool startedOnce = false;
+    // §PERF-R3（2026-11-26）：stop() 寫入這個 eventfd 叫醒 run()，run() 就能一次睡到下一秒，
+    // 不必為了「停得快」每 50 ms 醒一次。建立失敗（-1）時退回原本的 50 ms 切片。
+    int wakeFd = -1;
 
     std::mutex lock;
     HapticFn hapticFn;

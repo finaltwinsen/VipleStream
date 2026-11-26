@@ -77,8 +77,21 @@ namespace udp_tunnel {
     static thread_local hmac_ctx_holder s_holder;
     HMAC_CTX *s_ctx = s_holder.ctx;
 
-    HMAC_Init_ex(s_ctx, token.data(), static_cast<int>(token.size()),
-                 EVP_sha256(), nullptr);
+    // §PERF-R3（2026-11-26）：同一條 flow 的 token 不變，每包重新帶 key 呼叫 HMAC_Init_ex 會重算 ipad／opad
+    // （每包多兩次 SHA-256 壓縮）。這個執行緒上一次用的就是同一把 key 時傳 key＝NULL、md＝NULL，OpenSSL 沿用已展開的
+    // key 狀態重新開始一次 HMAC（文件記載的重用方式），算出的值完全相同。換 key 或初始化失敗就照原本帶 key 重設。
+    static thread_local std::array<uint8_t, TOKEN_LEN> s_key {};
+    static thread_local bool s_keyed = false;
+    if (s_keyed && s_key == token) {
+      if (HMAC_Init_ex(s_ctx, nullptr, 0, nullptr, nullptr) != 1) {
+        s_keyed = false;
+      }
+    }
+    if (!s_keyed || s_key != token) {
+      s_keyed = HMAC_Init_ex(s_ctx, token.data(), static_cast<int>(token.size()),
+                             EVP_sha256(), nullptr) == 1;
+      s_key = token;
+    }
     HMAC_Update(s_ctx, part1, len1);
     if (len2 > 0) {
       HMAC_Update(s_ctx, part2, len2);

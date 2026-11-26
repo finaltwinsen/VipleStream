@@ -9,6 +9,9 @@
 #include <cstring>
 #include <ctime>
 #include <time.h>
+#include <poll.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
 
 namespace {
 
@@ -102,6 +105,10 @@ void QxrVrMsg::start()
         return;
     }
     startedOnce = true;
+    // §PERF-R3（2026-11-26）：每次 start 都用新的 eventfd，上一次 stop 留下的計數不會讓 ppoll 一直立刻返回
+    if (wakeFd < 0) {
+        wakeFd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    }
     running.store(true, std::memory_order_release);
     thread = std::thread(&QxrVrMsg::run, this);
 }
@@ -110,10 +117,23 @@ void QxrVrMsg::stop()
 {
     if (!thread.joinable()) {
         running.store(false, std::memory_order_release);
+        if (wakeFd >= 0) {
+            close(wakeFd);
+            wakeFd = -1;
+        }
         return;
     }
     running.store(false, std::memory_order_release);
+    // §PERF-R3（2026-11-26）：叫醒正在 ppoll 的 run()，結束路徑不用等到下一秒
+    if (wakeFd >= 0) {
+        const uint64_t one = 1;
+        (void)write(wakeFd, &one, sizeof(one));
+    }
     thread.join();
+    if (wakeFd >= 0) {
+        close(wakeFd);
+        wakeFd = -1;
+    }
 }
 
 void QxrVrMsg::sendTiming()
@@ -290,6 +310,23 @@ void QxrVrMsg::run()
         timespec wake{};
         clock_gettime(CLOCK_MONOTONIC, &wake);
         const uint64_t targetNs = monoNs(next);
+        // §PERF-R3（2026-11-26）：有 eventfd 時一次睡到截止點（每秒醒一次，原本每秒 20 次），
+        // stop() 寫 eventfd 打斷。ppoll 的逾時是 CLOCK_MONOTONIC 的相對時間；EINTR 或提早醒都回到迴圈頂端重算。
+        if (wakeFd >= 0) {
+            const uint64_t wakeNowNs = monoNs(wake);
+            if (targetNs <= wakeNowNs) {
+                continue;
+            }
+            const uint64_t waitNs = targetNs - wakeNowNs;
+            timespec rel{};
+            rel.tv_sec = static_cast<time_t>(waitNs / 1000000000ull);
+            rel.tv_nsec = static_cast<long>(waitNs % 1000000000ull);
+            pollfd pfd{};
+            pfd.fd = wakeFd;
+            pfd.events = POLLIN;
+            (void)ppoll(&pfd, 1, &rel, nullptr);
+            continue;
+        }
         uint64_t wakeNs = monoNs(wake) + kWakeSliceNs;
         if (wakeNs > targetNs) {
             wakeNs = targetNs;

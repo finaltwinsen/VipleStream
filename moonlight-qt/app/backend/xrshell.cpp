@@ -478,7 +478,8 @@ bool XrShell::bringUpXr(QString* error)
     // 在 polish／綁定求值途中重入 render control 有風險。先上傳手上的那一張，再排一張正常的重畫（約 33 ms 內），
     // 排的那一張失敗也會照平常的路徑再排
     if (!m_Last.isNull()) {
-        m_Xr->setShellImage(m_Last.convertToFormat(m_Xr->shellImageFormat()));
+        // §PERF-R3（2026-11-26）：m_Last 是讀回的原樣（列由下往上，見 renderFrame），交給 XR 時標明
+        m_Xr->setShellImage(m_Last.convertToFormat(m_Xr->shellImageFormat()), true);
     }
     if (m_SkippedWhileHidden) {
         m_SkippedWhileHidden = false;
@@ -713,22 +714,20 @@ bool XrShell::renderFrame()
     m_NeedSync = false;
     m_SkippedWhileHidden = false;  // §PERF-1113：這一張已經包含之前略過的變更
 
-    // 讀回：GL 的列由下往上，翻成 QImage 的由上往下。介面整片不透明（VrShell.qml 的底色），直接當成不預乘的 RGBA
+    // 讀回：GL 的列由下往上。介面整片不透明（VrShell.qml 的底色），直接當成不預乘的 RGBA
+    // §PERF-R3（2026-11-26）：不再在這裡整張垂直翻轉（每張 4 MB 讀寫一趟，動畫中最多每秒 30 張）。m_Last 保持讀回的原樣
+    // （列由下往上），交給 XR 時標 bottomUp，上傳逐列抄進 staging 時倒著抄（XrContext::uploadImage）——顯示的像素逐位元相同。
+    // 只有 dev 截圖（runTest 的 dump）要由上往下的圖，存檔前才翻（shellDumpImage）
     QOpenGLExtraFunctions* f = m_Gl->extraFunctions();
     QImage img(kWidth, kHeight, QImage::Format_RGBA8888);
     f->glBindFramebuffer(GL_FRAMEBUFFER, m_Fbo);
     f->glPixelStorei(GL_PACK_ALIGNMENT, 4);
     f->glReadPixels(0, 0, kWidth, kHeight, GL_RGBA, GL_UNSIGNED_BYTE, img.bits());
     f->glBindFramebuffer(GL_FRAMEBUFFER, m_Gl->defaultFramebufferObject());
-#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
-    img.flip(Qt::Vertical);
-#else
-    img = img.mirrored(false, true);
-#endif
     m_Last = img;
 #ifdef HAVE_OPENXR
     if (m_Xr != nullptr) {
-        m_Xr->setShellImage(img.convertToFormat(m_Xr->shellImageFormat()));
+        m_Xr->setShellImage(img.convertToFormat(m_Xr->shellImageFormat()), true);
     }
 #endif
     // 網頁裡換欄位不會發 activeFocusItemChanged（見 focusChanged()），每畫一張重查一次要不要鍵盤
@@ -902,6 +901,16 @@ void XrShell::focusChanged()
 #endif
 }
 
+// §PERF-R3（2026-11-26）：m_Last 的列由下往上（見 renderFrame）；dev 截圖存檔前翻成一般的由上往下
+static QImage shellDumpImage(const QImage& bottomUp)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+    return bottomUp.flipped(Qt::Vertical);
+#else
+    return bottomUp.mirrored(false, true);
+#endif
+}
+
 void XrShell::runTest()
 {
     // dev 腳本："秒:指令[:參數…];…"，秒數從 start() 起算，依序執行。指令：
@@ -909,7 +918,7 @@ void XrShell::runTest()
     //   back、pbutton:n（影片模式的手把按鍵）、dump:png、quit
     const double elapsed = static_cast<double>(QDateTime::currentMSecsSinceEpoch() - m_StartMs) / 1000.0;
     if (m_Config.dumpSec > 0 && elapsed >= m_Config.dumpSec) {
-        const bool ok = m_Last.save(m_Config.dumpPath, "PNG");
+        const bool ok = !m_Last.isNull() && shellDumpImage(m_Last).save(m_Config.dumpPath, "PNG");
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-SHELL] dev dump -> %s (%s)", qPrintable(m_Config.dumpPath),
                     ok ? "ok" : "FAILED");
         m_Config.dumpSec = 0;
@@ -959,7 +968,7 @@ void XrShell::runTest()
 #endif
         else if (cmd == QLatin1String("dump")) {
             renderFrame();  // §PERF-1113：dev 截圖不看閘控
-            const bool ok = m_Last.save(a.mid(2).join(QLatin1Char(':')), "PNG");
+            const bool ok = !m_Last.isNull() && shellDumpImage(m_Last).save(a.mid(2).join(QLatin1Char(':')), "PNG");
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-SHELL] dev dump %s", ok ? "ok" : "FAILED");
         }
         else if (cmd == QLatin1String("quit")) {

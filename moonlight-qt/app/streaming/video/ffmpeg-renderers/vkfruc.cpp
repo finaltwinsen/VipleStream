@@ -1575,6 +1575,18 @@ bool VkFrucRenderer::createLogicalDevice()
                      "[VIPLE-VKFRUC] §J.3.e.2.i.2 device proc table incomplete");
         return false;
     }
+    // §PERF-R3（2026-11-26）：每幀錄製用的函式指標在這裡查一次（見 vkfruc.h 的 FrameCmdFns）
+    m_FrameFns.CmdBindPipeline       = (PFN_vkCmdBindPipeline)pfnGetDeviceProcAddr(m_Device, "vkCmdBindPipeline");
+    m_FrameFns.CmdBindDescriptorSets = (PFN_vkCmdBindDescriptorSets)pfnGetDeviceProcAddr(m_Device, "vkCmdBindDescriptorSets");
+    m_FrameFns.CmdPushConstants      = (PFN_vkCmdPushConstants)pfnGetDeviceProcAddr(m_Device, "vkCmdPushConstants");
+    m_FrameFns.CmdDispatch           = (PFN_vkCmdDispatch)pfnGetDeviceProcAddr(m_Device, "vkCmdDispatch");
+    m_FrameFns.CmdPipelineBarrier    = (PFN_vkCmdPipelineBarrier)pfnGetDeviceProcAddr(m_Device, "vkCmdPipelineBarrier");
+    m_FrameFns.CmdCopyBuffer         = (PFN_vkCmdCopyBuffer)pfnGetDeviceProcAddr(m_Device, "vkCmdCopyBuffer");
+    m_FrameFns.CmdResetQueryPool     = (PFN_vkCmdResetQueryPool)pfnGetDeviceProcAddr(m_Device, "vkCmdResetQueryPool");
+    m_FrameFns.CmdWriteTimestamp     = (PFN_vkCmdWriteTimestamp)pfnGetDeviceProcAddr(m_Device, "vkCmdWriteTimestamp");
+    m_FrameFns.GetQueryPoolResults   = (PFN_vkGetQueryPoolResults)pfnGetDeviceProcAddr(m_Device, "vkGetQueryPoolResults");
+    m_FrameFns.CmdCopyBufferToImage  = (PFN_vkCmdCopyBufferToImage)pfnGetDeviceProcAddr(m_Device, "vkCmdCopyBufferToImage");
+    m_FrameFns.CmdCopyImageToBuffer  = (PFN_vkCmdCopyImageToBuffer)pfnGetDeviceProcAddr(m_Device, "vkCmdCopyImageToBuffer");
     pfnGetDeviceQueue(m_Device, m_QueueFamily, 0, &m_GraphicsQueue);
     // §B2 follow-up 2026-05-06 — fetch OF queue handle if extension enabled.
     if (m_OpticalFlowQueueFamily != UINT32_MAX) {
@@ -4840,10 +4852,9 @@ upload_to_staging:
 void VkFrucRenderer::uploadPendingOverlay(VkCommandBuffer cmd)
 {
     if (!m_OverlayPipeline) return;
-    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
-        m_Instance, "vkGetDeviceProcAddr");
-    auto pfnCmdCopyBufferToImage = (PFN_vkCmdCopyBufferToImage)getDevPa(m_Device, "vkCmdCopyBufferToImage");
-    auto pfnCmdPipelineBarrier   = (PFN_vkCmdPipelineBarrier)getDevPa(m_Device, "vkCmdPipelineBarrier");
+    // §PERF-R3（2026-11-26）：每幀呼叫，改用 createLogicalDevice 查好的指標，不再每幀字串查表
+    auto pfnCmdCopyBufferToImage = m_FrameFns.CmdCopyBufferToImage;
+    auto pfnCmdPipelineBarrier   = m_FrameFns.CmdPipelineBarrier;
 
     for (uint32_t type = 0; type < kOverlayMax; type++) {
         if (!m_OverlayPending[type] || !m_OverlayImage[type]) continue;
@@ -4893,9 +4904,8 @@ void VkFrucRenderer::uploadPendingOverlay(VkCommandBuffer cmd)
 void VkFrucRenderer::drawOverlayInRenderPass(VkCommandBuffer cmd)
 {
     if (!m_OverlayPipeline) return;
-    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
-        m_Instance, "vkGetDeviceProcAddr");
-    auto pfnCmdPushConstants = (PFN_vkCmdPushConstants)getDevPa(m_Device, "vkCmdPushConstants");
+    // §PERF-R3（2026-11-26）：每幀呼叫，改用 createLogicalDevice 查好的指標
+    auto pfnCmdPushConstants = m_FrameFns.CmdPushConstants;
 
     bool boundPipeline = false;
     for (uint32_t type = 0; type < kOverlayMax; type++) {
@@ -9846,14 +9856,13 @@ bool VkFrucRenderer::runRifeNativeStage(VkCommandBuffer cmd,
         || m_RifeDownCurr == VK_NULL_HANDLE
         || m_RifeDownInterp == VK_NULL_HANDLE) return false;
 
-    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
-        m_Instance, "vkGetDeviceProcAddr");
-    auto pfnCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)getDevPa(m_Device, "vkCmdPipelineBarrier");
-    auto pfnCmdBindPipeline    = (PFN_vkCmdBindPipeline)   getDevPa(m_Device, "vkCmdBindPipeline");
-    auto pfnCmdBindDescSets    = (PFN_vkCmdBindDescriptorSets)getDevPa(m_Device, "vkCmdBindDescriptorSets");
-    auto pfnCmdPushConst       = (PFN_vkCmdPushConstants)  getDevPa(m_Device, "vkCmdPushConstants");
-    auto pfnCmdDispatch        = (PFN_vkCmdDispatch)       getDevPa(m_Device, "vkCmdDispatch");
-    auto pfnCmdWriteTimestamp  = (PFN_vkCmdWriteTimestamp) getDevPa(m_Device, "vkCmdWriteTimestamp");
+    // §PERF-R3（2026-11-26）：每幀呼叫，改用 createLogicalDevice 查好的指標
+    auto pfnCmdPipelineBarrier = m_FrameFns.CmdPipelineBarrier;
+    auto pfnCmdBindPipeline    = m_FrameFns.CmdBindPipeline;
+    auto pfnCmdBindDescSets    = m_FrameFns.CmdBindDescriptorSets;
+    auto pfnCmdPushConst       = m_FrameFns.CmdPushConstants;
+    auto pfnCmdDispatch        = m_FrameFns.CmdDispatch;
+    auto pfnCmdWriteTimestamp  = m_FrameFns.CmdWriteTimestamp;
     if (!pfnCmdPipelineBarrier || !pfnCmdBindPipeline || !pfnCmdBindDescSets
         || !pfnCmdPushConst || !pfnCmdDispatch) return false;
 
@@ -10155,13 +10164,12 @@ bool VkFrucRenderer::recordRifeDown(VkCommandBuffer cmd, uint32_t width, uint32_
     if (m_RifeDownPrev == VK_NULL_HANDLE
         || m_RifeDownCurr == VK_NULL_HANDLE) return false;
 
-    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
-        m_Instance, "vkGetDeviceProcAddr");
-    auto pfnCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)getDevPa(m_Device, "vkCmdPipelineBarrier");
-    auto pfnCmdBindPipeline    = (PFN_vkCmdBindPipeline)   getDevPa(m_Device, "vkCmdBindPipeline");
-    auto pfnCmdBindDescSets    = (PFN_vkCmdBindDescriptorSets)getDevPa(m_Device, "vkCmdBindDescriptorSets");
-    auto pfnCmdPushConst       = (PFN_vkCmdPushConstants)  getDevPa(m_Device, "vkCmdPushConstants");
-    auto pfnCmdDispatch        = (PFN_vkCmdDispatch)       getDevPa(m_Device, "vkCmdDispatch");
+    // §PERF-R3（2026-11-26）：每幀呼叫，改用 createLogicalDevice 查好的指標
+    auto pfnCmdPipelineBarrier = m_FrameFns.CmdPipelineBarrier;
+    auto pfnCmdBindPipeline    = m_FrameFns.CmdBindPipeline;
+    auto pfnCmdBindDescSets    = m_FrameFns.CmdBindDescriptorSets;
+    auto pfnCmdPushConst       = m_FrameFns.CmdPushConstants;
+    auto pfnCmdDispatch        = m_FrameFns.CmdDispatch;
     if (!pfnCmdPipelineBarrier || !pfnCmdBindPipeline || !pfnCmdBindDescSets
         || !pfnCmdPushConst || !pfnCmdDispatch) return false;
 
@@ -10231,9 +10239,8 @@ bool VkFrucRenderer::recordRifeInferOnCompute(VkCommandBuffer cmd,
     if (m_RifeFlowOutBuf == VK_NULL_HANDLE
         || m_RifeMaskOutBuf == VK_NULL_HANDLE) return false;
 
-    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
-        m_Instance, "vkGetDeviceProcAddr");
-    auto pfnCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)getDevPa(m_Device, "vkCmdPipelineBarrier");
+    // §PERF-R3（2026-11-26）：每幀呼叫，改用 createLogicalDevice 查好的指標
+    auto pfnCmdPipelineBarrier = m_FrameFns.CmdPipelineBarrier;
     if (!pfnCmdPipelineBarrier) return false;
 
     auto bufBarrier = [&](VkBuffer b,
@@ -10277,13 +10284,12 @@ bool VkFrucRenderer::recordRifeWarp(VkCommandBuffer cmd, uint32_t width, uint32_
         || m_RifeNativeWarpDs    == VK_NULL_HANDLE) return false;
     if (m_FrucInterpRgbBuf == VK_NULL_HANDLE) return false;
 
-    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
-        m_Instance, "vkGetDeviceProcAddr");
-    auto pfnCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)getDevPa(m_Device, "vkCmdPipelineBarrier");
-    auto pfnCmdBindPipeline    = (PFN_vkCmdBindPipeline)   getDevPa(m_Device, "vkCmdBindPipeline");
-    auto pfnCmdBindDescSets    = (PFN_vkCmdBindDescriptorSets)getDevPa(m_Device, "vkCmdBindDescriptorSets");
-    auto pfnCmdPushConst       = (PFN_vkCmdPushConstants)  getDevPa(m_Device, "vkCmdPushConstants");
-    auto pfnCmdDispatch        = (PFN_vkCmdDispatch)       getDevPa(m_Device, "vkCmdDispatch");
+    // §PERF-R3（2026-11-26）：每幀呼叫，改用 createLogicalDevice 查好的指標
+    auto pfnCmdPipelineBarrier = m_FrameFns.CmdPipelineBarrier;
+    auto pfnCmdBindPipeline    = m_FrameFns.CmdBindPipeline;
+    auto pfnCmdBindDescSets    = m_FrameFns.CmdBindDescriptorSets;
+    auto pfnCmdPushConst       = m_FrameFns.CmdPushConstants;
+    auto pfnCmdDispatch        = m_FrameFns.CmdDispatch;
     if (!pfnCmdPipelineBarrier || !pfnCmdBindPipeline || !pfnCmdBindDescSets
         || !pfnCmdPushConst || !pfnCmdDispatch) return false;
 
@@ -10701,17 +10707,16 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
         m_NvOfProfLastLog = std::chrono::steady_clock::now();
     }
 
-    auto getDevPa = (PFN_vkGetDeviceProcAddr)m_pfnGetInstanceProcAddr(
-        m_Instance, "vkGetDeviceProcAddr");
-    auto pfnCmdBindPipeline    = (PFN_vkCmdBindPipeline)getDevPa(m_Device, "vkCmdBindPipeline");
-    auto pfnCmdBindDescSets    = (PFN_vkCmdBindDescriptorSets)getDevPa(m_Device, "vkCmdBindDescriptorSets");
-    auto pfnCmdPushConst       = (PFN_vkCmdPushConstants)getDevPa(m_Device, "vkCmdPushConstants");
-    auto pfnCmdDispatch        = (PFN_vkCmdDispatch)getDevPa(m_Device, "vkCmdDispatch");
-    auto pfnCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier)getDevPa(m_Device, "vkCmdPipelineBarrier");
-    auto pfnCmdCopyBuffer      = (PFN_vkCmdCopyBuffer)getDevPa(m_Device, "vkCmdCopyBuffer");
-    auto pfnCmdResetQueryPool  = (PFN_vkCmdResetQueryPool)getDevPa(m_Device, "vkCmdResetQueryPool");
-    auto pfnCmdWriteTimestamp  = (PFN_vkCmdWriteTimestamp)getDevPa(m_Device, "vkCmdWriteTimestamp");
-    auto pfnGetQueryPoolResults = (PFN_vkGetQueryPoolResults)getDevPa(m_Device, "vkGetQueryPoolResults");
+    // §PERF-R3（2026-11-26）：每幀呼叫，改用 createLogicalDevice 查好的指標，不再每幀十次字串查表
+    auto pfnCmdBindPipeline    = m_FrameFns.CmdBindPipeline;
+    auto pfnCmdBindDescSets    = m_FrameFns.CmdBindDescriptorSets;
+    auto pfnCmdPushConst       = m_FrameFns.CmdPushConstants;
+    auto pfnCmdDispatch        = m_FrameFns.CmdDispatch;
+    auto pfnCmdPipelineBarrier = m_FrameFns.CmdPipelineBarrier;
+    auto pfnCmdCopyBuffer      = m_FrameFns.CmdCopyBuffer;
+    auto pfnCmdResetQueryPool  = m_FrameFns.CmdResetQueryPool;
+    auto pfnCmdWriteTimestamp  = m_FrameFns.CmdWriteTimestamp;
+    auto pfnGetQueryPoolResults = m_FrameFns.GetQueryPoolResults;
     if (!pfnCmdBindPipeline || !pfnCmdBindDescSets || !pfnCmdPushConst
         || !pfnCmdDispatch || !pfnCmdPipelineBarrier || !pfnCmdCopyBuffer) return false;
 
@@ -11135,8 +11140,8 @@ bool VkFrucRenderer::runFrucComputeChain(VkCommandBuffer cmd, uint32_t width, ui
             0, 0, nullptr, 0, nullptr, 1, &flowToSrc);
 
         // Copy flow image → staging buffer (4 bytes per pixel = R16G16).
-        auto pfnCmdCopyImageToBuffer = (PFN_vkCmdCopyImageToBuffer)getDevPa(
-            m_Device, "vkCmdCopyImageToBuffer");
+        // §PERF-R3（2026-11-26）：NVOF 開著時每幀走這裡，改用 createLogicalDevice 查好的指標
+        auto pfnCmdCopyImageToBuffer = m_FrameFns.CmdCopyImageToBuffer;
         if (pfnCmdCopyImageToBuffer) {
             VkBufferImageCopy reg = {};
             reg.bufferOffset      = 0;

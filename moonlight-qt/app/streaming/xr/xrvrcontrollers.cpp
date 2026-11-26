@@ -590,12 +590,51 @@ void XrVrControllers::updateButtons(bool focused, uint64_t syncDoneNs)
         m_Focused = focused;
     }
 
+    // §PERF-R3（2026-11-26）：這一格的 action state 每手每個 action 只讀一次。原本鍵盤開關與正式按鍵兩段各自呼叫
+    // xrGetActionState*（扳機、握把的值與 click、menu 都讀兩次；結束組合鍵再讀右手 A），有焦點時每格約 47 次 runtime 呼叫，
+    // 改成先讀一份快照三段共用（36 次；X 鍵只有結束組合鍵用，照原本的短路在那裡現讀）。action state 只在 xrSyncActions
+    // 那一刻更新（OpenXR 規格），三段都在同一次 sync 之後、同一條 frame thread 上，中間沒有別的 sync（m_ExitCombo 只推
+    // SDL_QUIT）——讀到的值和原本每次現讀完全相同。沒焦點或 dev 合成按鍵時原本就一個都不讀，這裡也不讀
+    struct RawHand {
+        float trigger = 0.0f;
+        float grip = 0.0f;
+        XrVector2f stick {0.0f, 0.0f};
+        bool system = false, menu = false, lo = false, hi = false, c = false, d = false, bumper = false;
+        bool stickClick = false, trigClick = false, gripClick = false;
+        bool loTouch = false, hiTouch = false, stickTouch = false, trigTouch = false, thumbrest = false;
+    };
+    RawHand raw[2];
+    if (focused && !m_TestInput) {
+        for (int h = 0; h < 2; h++) {
+            RawHand& r = raw[h];
+            r.trigger = floatState(m_TriggerValue, h);
+            r.grip = floatState(m_SqueezeValue, h);
+            r.stick = vecState(m_Stick, h);
+            r.system = boolState(m_System, h);
+            r.menu = boolState(m_Menu, h);
+            r.lo = boolState(m_BtnLo, h);
+            r.hi = boolState(m_BtnHi, h);
+            r.c = boolState(m_BtnC, h);
+            r.d = boolState(m_BtnD, h);
+            r.bumper = boolState(m_Bumper, h);
+            r.stickClick = boolState(m_StickClick, h);
+            r.trigClick = boolState(m_TriggerClick, h);
+            r.gripClick = boolState(m_SqueezeClick, h);
+            r.loTouch = boolState(m_BtnLoTouch, h);
+            r.hiTouch = boolState(m_BtnHiTouch, h);
+            r.stickTouch = boolState(m_StickTouch, h);
+            r.trigTouch = boolState(m_TriggerTouch, h);
+            r.thumbrest = boolState(m_ThumbrestTouch, h);
+        }
+    }
+
     // §VR-EXIT-COMBO（2026-10-22 頭盔實測：VR 串流裡按了沒反應）：PCVR 不建 XrInput，組合鍵原本只在 XR 桌面有效。
     // 右手 A＋X（Touch 左手、Frame 右手）＋任一手扳機＋任一手握把整組按住的上升緣；這幾鍵照樣轉送給主機
     if (m_ExitCombo && focused && !m_TestInput) {
-        const bool combo = boolState(m_BtnLo, 1) && (boolState(m_ComboX, 0) || boolState(m_ComboX, 1)) &&
-                           std::max(floatState(m_TriggerValue, 0), floatState(m_TriggerValue, 1)) >= kClickOn &&
-                           std::max(floatState(m_SqueezeValue, 0), floatState(m_SqueezeValue, 1)) >= kClickOn;
+        // §PERF-R3（2026-11-26）：A、扳機、握把改讀上面的快照（值相同）；X 照舊現讀（A 沒按時短路，一次都不讀）
+        const bool combo = raw[1].lo && (boolState(m_ComboX, 0) || boolState(m_ComboX, 1)) &&
+                           std::max(raw[0].trigger, raw[1].trigger) >= kClickOn &&
+                           std::max(raw[0].grip, raw[1].grip) >= kClickOn;
         if (combo && !m_ExitComboWas) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-INPUT] exit combo (A+X+trigger+grip)");
             m_ExitCombo();
@@ -613,9 +652,10 @@ void XrVrControllers::updateButtons(bool focused, uint64_t syncDoneNs)
     bool kbAnyHeld = false;
     for (int h = 0; h < 2; h++) {
         const bool live = focused && !m_TestInput && m_KbKey;
-        const bool trig = live && (floatState(m_TriggerValue, h) >= kClickOn || boolState(m_TriggerClick, h));
-        const bool grip = live && (floatState(m_SqueezeValue, h) >= kClickOn || boolState(m_SqueezeClick, h));
-        const bool menu = live && boolState(m_Menu, h);
+        // §PERF-R3（2026-11-26）：改讀快照（live 為真時 focused && !m_TestInput 一定成立，快照已經讀過）
+        const bool trig = live && (raw[h].trigger >= kClickOn || raw[h].trigClick);
+        const bool grip = live && (raw[h].grip >= kClickOn || raw[h].gripClick);
+        const bool menu = live && raw[h].menu;
         m_KbRawTrigger[h] = trig;
         kbAnyHeld = kbAnyHeld || trig || grip || menu;
         if (!(menu && grip && !trig)) {
@@ -649,26 +689,27 @@ void XrVrControllers::updateButtons(bool focused, uint64_t syncDoneNs)
             applyTestInput(h, &buttons, &touches, &trigger, &grip, &sx, &sy, nowNs);
         }
         else if (focused) {
-            trigger = floatState(m_TriggerValue, h);
-            grip = floatState(m_SqueezeValue, h);
-            const XrVector2f st = vecState(m_Stick, h);
-            sx = st.x;
-            sy = st.y;
-            if (boolState(m_System, h)) buttons |= VIPLE_VR_BTN_SYSTEM;
-            if (boolState(m_Menu, h)) buttons |= VIPLE_VR_BTN_MENU;
-            if (boolState(m_BtnLo, h)) buttons |= VIPLE_VR_BTN_A;
-            if (boolState(m_BtnHi, h)) buttons |= VIPLE_VR_BTN_B;
-            if (boolState(m_BtnC, h)) buttons |= VIPLE_VR_BTN_C;
-            if (boolState(m_BtnD, h)) buttons |= VIPLE_VR_BTN_D;
-            if (boolState(m_Bumper, h)) buttons |= VIPLE_VR_BTN_BUMPER;
-            if (boolState(m_StickClick, h)) buttons |= VIPLE_VR_BTN_THUMBSTICK;
-            if (boolState(m_TriggerClick, h)) buttons |= VIPLE_VR_BTN_TRIGGER;
-            if (boolState(m_SqueezeClick, h)) buttons |= VIPLE_VR_BTN_GRIP;
-            if (boolState(m_BtnLoTouch, h)) touches |= VIPLE_VR_BTN_A;
-            if (boolState(m_BtnHiTouch, h)) touches |= VIPLE_VR_BTN_B;
-            if (boolState(m_StickTouch, h)) touches |= VIPLE_VR_BTN_THUMBSTICK;
-            if (boolState(m_TriggerTouch, h)) touches |= VIPLE_VR_BTN_TRIGGER;
-            if (boolState(m_ThumbrestTouch, h)) touches |= VIPLE_VR_BTN_THUMBREST;
+            // §PERF-R3（2026-11-26）：改讀快照（這一支 m_TestInput 為假、focused 為真，快照已經讀過）
+            const RawHand& r = raw[h];
+            trigger = r.trigger;
+            grip = r.grip;
+            sx = r.stick.x;
+            sy = r.stick.y;
+            if (r.system) buttons |= VIPLE_VR_BTN_SYSTEM;
+            if (r.menu) buttons |= VIPLE_VR_BTN_MENU;
+            if (r.lo) buttons |= VIPLE_VR_BTN_A;
+            if (r.hi) buttons |= VIPLE_VR_BTN_B;
+            if (r.c) buttons |= VIPLE_VR_BTN_C;
+            if (r.d) buttons |= VIPLE_VR_BTN_D;
+            if (r.bumper) buttons |= VIPLE_VR_BTN_BUMPER;
+            if (r.stickClick) buttons |= VIPLE_VR_BTN_THUMBSTICK;
+            if (r.trigClick) buttons |= VIPLE_VR_BTN_TRIGGER;
+            if (r.gripClick) buttons |= VIPLE_VR_BTN_GRIP;
+            if (r.loTouch) touches |= VIPLE_VR_BTN_A;
+            if (r.hiTouch) touches |= VIPLE_VR_BTN_B;
+            if (r.stickTouch) touches |= VIPLE_VR_BTN_THUMBSTICK;
+            if (r.trigTouch) touches |= VIPLE_VR_BTN_TRIGGER;
+            if (r.thumbrest) touches |= VIPLE_VR_BTN_THUMBREST;
         }
         // 類比值推導的 click／touch（沒有 click 元件的 profile，例如 Touch 的 trigger、squeeze）
         if (trigger >= kClickOn) buttons |= VIPLE_VR_BTN_TRIGGER;

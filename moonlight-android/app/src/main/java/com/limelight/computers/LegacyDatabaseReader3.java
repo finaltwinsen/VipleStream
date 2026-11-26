@@ -128,6 +128,10 @@ public class LegacyDatabaseReader3 {
     }
 
     public static List<ComputerDetails> migrateAllComputers(Context c) {
+        // §LOGDROP-1126：新安裝沒有舊資料庫時不要去開，否則 Android 在例外被接住前就印出整段堆疊（每個檔 20 多行）
+        if (!c.getDatabasePath(COMPUTER_DB_NAME).exists()) {
+            return new LinkedList<ComputerDetails>();
+        }
         try (final SQLiteDatabase computerDb = SQLiteDatabase.openDatabase(
                 c.getDatabasePath(COMPUTER_DB_NAME).getPath(),
                 null, SQLiteDatabase.OPEN_READONLY)

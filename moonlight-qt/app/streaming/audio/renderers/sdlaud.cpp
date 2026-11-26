@@ -153,13 +153,20 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
 
     // Don't queue if there's already more than 30 ms of audio data waiting
     // in Moonlight's audio queue.
-    if (LiGetPendingAudioDuration() > 30) {
+    // §PERF-R3（2026-11-26）：這兩個值下面的修剪／統計段會再讀一次。中間沒有睡（背壓迴圈第一圈就放行，
+    // 也就是絕大多數封包）時兩次讀是同一瞬間，直接沿用，不再多拿一次 SDL 音訊裝置鎖
+    // （SDL_GetQueuedAudioSize 會鎖住 audio callback 執行緒用的那把）與 common-c 的佇列查詢。
+    const int pendingAudioMs = LiGetPendingAudioDuration();
+    if (pendingAudioMs > 30) {
         return true;
     }
 
     // Provide backpressure on the queue to ensure too many frames don't build up
     // in SDL's audio queue, but don't wait forever to avoid a deadlock if the
     // audio device fails.
+    Uint32 lastQueuedBytes = 0;
+    bool queuedFresh = false;   // §PERF-R3：lastQueuedBytes 是放行那一刻讀到的（之後沒再睡）
+    bool pendingFresh = false;  // §PERF-R3：pendingAudioMs 讀完之後沒睡過
     for (int i = 0; i < 100; i++) {
         // Our device may enter a permanent error status upon removal, so we need
         // to recreate the audio device to pick up the new default audio device.
@@ -168,7 +175,10 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
         }
 
         // Only queue more samples where there are 10 frames or less in SDL's queue
-        if (SDL_GetQueuedAudioSize(m_AudioDevice) / m_FrameSize <= 10) {
+        lastQueuedBytes = SDL_GetQueuedAudioSize(m_AudioDevice);
+        if (lastQueuedBytes / m_FrameSize <= 10) {
+            queuedFresh = true;
+            pendingFresh = (i == 0);
             break;
         }
 
@@ -186,11 +196,12 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
         const Uint32 kStatIntervalMs = 30000;
 
         Uint32 now = SDL_GetTicks();
-        Uint32 queuedMs = SDL_GetQueuedAudioSize(m_AudioDevice) / m_BytesPerMs;
+        // §PERF-R3（2026-11-26）：放行當下剛讀過就沿用（見上方），否則照舊重讀
+        Uint32 queuedMs = (queuedFresh ? lastQueuedBytes : SDL_GetQueuedAudioSize(m_AudioDevice)) / m_BytesPerMs;
 
         if (queuedMs < m_StatMinMs) m_StatMinMs = queuedMs;
         if (queuedMs > m_StatMaxMs) m_StatMaxMs = queuedMs;
-        Uint32 pendingMs = (Uint32)LiGetPendingAudioDuration();
+        Uint32 pendingMs = (Uint32)(pendingFresh ? pendingAudioMs : LiGetPendingAudioDuration());
         if (pendingMs > m_StatPendingMaxMs) m_StatPendingMaxMs = pendingMs;
 
         bool dropThisFrame = false;

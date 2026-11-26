@@ -2428,7 +2428,11 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
     const int prevSmallH = m_Small[0] != nullptr ? m_Small[0]->params.h : 0;
     // dev：帶了 --xr-dump-frame 時這幾張要能讀回（dumpSynthInputs）。格式不支援讀回就照舊建立，只是那幾個檔不會存
     const bool devRead = !m_Config.dumpPath.isEmpty();
-    auto mk = [g, devRead](pl_tex* t, int w, int h, pl_fmt f) {
+    // §SYNTH-PREV-KEEP（2026-11-26）：pl_tex_recreate 在參數相同時會呼叫 pl_tex_invalidate（libplacebo gpu.c），Vulkan 後端
+    // 把貼圖標成 may_invalidate、下次使用從 UNDEFINED 轉換＝內容可以被丟掉。原本每張都對兩張縮圖 recreate，光流要讀的
+    // 「上一張」（m_Small[prev]、m_Mid[prev]）在被讀之前就已作廢；Adreno 這種分塊 GPU 上可能讀到垃圾、估錯位移。
+    // keep＝true 的貼圖參數沒變就原樣留著；這一格要寫的那張（cur）在下面另外明確作廢（省掉載入舊內容的頻寬）。
+    auto mk = [g, devRead](pl_tex* t, int w, int h, pl_fmt f, bool keep = false) {
         pl_tex_params tp = {};
         tp.w = w;
         tp.h = h;
@@ -2436,13 +2440,17 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         tp.sampleable = true;
         tp.renderable = true;
         tp.host_readable = devRead && (f->caps & PL_FMT_CAP_HOST_READABLE) != 0;
+        if (keep && *t != nullptr && (*t)->params.w == w && (*t)->params.h == h && (*t)->params.format == f &&
+            (*t)->params.sampleable && (*t)->params.renderable && (*t)->params.host_readable == tp.host_readable) {
+            return true;
+        }
         return pl_tex_recreate(g, t, &tp);
     };
     (void) wantFloat;
     const int mw = std::max(8, sw / 2), mh = std::max(8, sh / 2);
     if (fmtSmall == nullptr || fmtFlow == nullptr || !ensureFull(fw, fh) ||
-        !mk(&m_Mid[0], mw, mh, fmtSmall) || !mk(&m_Mid[1], mw, mh, fmtSmall) || !mk(&m_FlowC, mw, mh, fmtFlow) ||
-        !mk(&m_Small[0], sw, sh, fmtSmall) || !mk(&m_Small[1], sw, sh, fmtSmall) || !mk(&m_Flow, sw, sh, fmtFlow)) {
+        !mk(&m_Mid[0], mw, mh, fmtSmall, true) || !mk(&m_Mid[1], mw, mh, fmtSmall, true) || !mk(&m_FlowC, mw, mh, fmtFlow) ||
+        !mk(&m_Small[0], sw, sh, fmtSmall, true) || !mk(&m_Small[1], sw, sh, fmtSmall, true) || !mk(&m_Flow, sw, sh, fmtFlow)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] texture setup failed - frame synthesis off for this session");
         {
             std::lock_guard<std::mutex> lk(m_StatsMutex);
@@ -2487,6 +2495,9 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         return pl_render_image(m_Renderer, mapped, &t, &m_RenderParams);
     }
     const int cur = m_SmallCur, prev = cur ^ 1;
+    // §SYNTH-PREV-KEEP：這一格整張重寫的兩張先作廢（舊內容不必載入）；prev 那兩張保留給光流讀
+    pl_tex_invalidate(g, m_Small[cur]);
+    pl_tex_invalidate(g, m_Mid[cur]);
     bool smallOk = false;
     {
         // vs_ref 只用來取輸出尺寸（另一張縮圖，尺寸相同）
@@ -3632,7 +3643,11 @@ bool XrVideo::renderTilesSynth(pl_frame* mapped, const pl_frame* targetProto, pl
     const int prevSmallW = m_Small[0] != nullptr ? m_Small[0]->params.w : 0;
     const int prevSmallH = m_Small[0] != nullptr ? m_Small[0]->params.h : 0;
     const bool devRead = !m_Config.dumpPath.isEmpty();
-    auto mk = [g, devRead](pl_tex* t, int w, int h, pl_fmt f) {
+    // §SYNTH-PREV-KEEP（2026-11-26）：pl_tex_recreate 在參數相同時會呼叫 pl_tex_invalidate（libplacebo gpu.c），Vulkan 後端
+    // 把貼圖標成 may_invalidate、下次使用從 UNDEFINED 轉換＝內容可以被丟掉。原本每張都對兩張縮圖 recreate，光流要讀的
+    // 「上一張」（m_Small[prev]、m_Mid[prev]）在被讀之前就已作廢；Adreno 這種分塊 GPU 上可能讀到垃圾、估錯位移。
+    // keep＝true 的貼圖參數沒變就原樣留著；這一格要寫的那張（cur）在下面另外明確作廢（省掉載入舊內容的頻寬）。
+    auto mk = [g, devRead](pl_tex* t, int w, int h, pl_fmt f, bool keep = false) {
         pl_tex_params tp = {};
         tp.w = w;
         tp.h = h;
@@ -3640,11 +3655,15 @@ bool XrVideo::renderTilesSynth(pl_frame* mapped, const pl_frame* targetProto, pl
         tp.sampleable = true;
         tp.renderable = true;
         tp.host_readable = devRead && (f->caps & PL_FMT_CAP_HOST_READABLE) != 0;
+        if (keep && *t != nullptr && (*t)->params.w == w && (*t)->params.h == h && (*t)->params.format == f &&
+            (*t)->params.sampleable && (*t)->params.renderable && (*t)->params.host_readable == tp.host_readable) {
+            return true;
+        }
         return pl_tex_recreate(g, t, &tp);
     };
     if (fmtSmall == nullptr || fmtFlow == nullptr ||
-        !mk(&m_Mid[0], mw, mh, fmtSmall) || !mk(&m_Mid[1], mw, mh, fmtSmall) || !mk(&m_FlowC, mw, mh, fmtFlow) ||
-        !mk(&m_Small[0], sw, sh, fmtSmall) || !mk(&m_Small[1], sw, sh, fmtSmall) || !mk(&m_Flow, sw, sh, fmtFlow)) {
+        !mk(&m_Mid[0], mw, mh, fmtSmall, true) || !mk(&m_Mid[1], mw, mh, fmtSmall, true) || !mk(&m_FlowC, mw, mh, fmtFlow) ||
+        !mk(&m_Small[0], sw, sh, fmtSmall, true) || !mk(&m_Small[1], sw, sh, fmtSmall, true) || !mk(&m_Flow, sw, sh, fmtFlow)) {
         return fail("texture setup failed");
     }
     if (m_FrameH != th) {
@@ -3676,6 +3695,9 @@ bool XrVideo::renderTilesSynth(pl_frame* mapped, const pl_frame* targetProto, pl
     float topCrop[4] = {crop[0], crop[1], 2.0f * tile[0], tile[1]};  // 上排（兩眼的全視野）在亮度平面裡的範圍
 
     const int cur = m_SmallCur, prev = cur ^ 1;
+    // §SYNTH-PREV-KEEP：這一格整張重寫的兩張先作廢（舊內容不必載入）；prev 那兩張保留給光流讀
+    pl_tex_invalidate(g, m_Small[cur]);
+    pl_tex_invalidate(g, m_Mid[cur]);
     bool smallOk = false;
     {
         pl_shader shd = pl_dispatch_begin(m_Dp);
