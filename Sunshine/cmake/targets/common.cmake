@@ -10,6 +10,32 @@ foreach(dep ${SUNSHINE_TARGET_DEPENDENCIES})
     add_dependencies(sunshine ${dep})  # compile these before sunshine
 endforeach()
 
+# §VRDUAL-7A：每次建置重寫 build id（內容沒變就不動檔案時間）。§VRDUAL-4A：ABI 表與標頭不一致就失敗。
+set(VIPLE_BUILD_ID_GEN "${CMAKE_BINARY_DIR}/generated/viple_build_id_gen.h")
+add_custom_target(viple-build-id
+        COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DOUT=${VIPLE_BUILD_ID_GEN}
+        -P ${CMAKE_SOURCE_DIR}/cmake/prep/write_viple_build_id.cmake
+        COMMENT "Writing viple_build_id_gen.h (git commit + dirty)"
+        VERBATIM)
+add_dependencies(sunshine viple-build-id)
+
+find_program(VIPLE_PYTHON NAMES python3 python py)
+if(VIPLE_PYTHON)
+    add_custom_target(vripc-abi-check
+            COMMAND "${VIPLE_PYTHON}" "${CMAKE_SOURCE_DIR}/scripts/gen_vr_ipc_abi_table.py" --check
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            COMMENT "Checking VR IPC ABI table against vr_ipc_abi.h"
+            VERBATIM)
+else()
+    add_custom_target(vripc-abi-check
+            COMMAND ${CMAKE_COMMAND} -E echo "WARNING: VR IPC ABI check skipped - Python (python3, python, or py) not found."
+            COMMENT "Checking VR IPC ABI table against vr_ipc_abi.h"
+            VERBATIM)
+endif()
+add_dependencies(sunshine vripc-abi-check)
+
 # VipleStream rebrand: keep CMake target name "sunshine" so the rest of
 # the build system (target_link_libraries, etc) doesn't ripple, but
 # emit the binary as viplestream-server[.exe].  Build scripts and

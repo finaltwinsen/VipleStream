@@ -6,6 +6,7 @@
 
 #include "compositor_ps.h"  // fxc 產生（out\gen）
 #include "compositor_vs.h"
+#include "driver_log.h"  // §VRDUAL-1A
 
 namespace vrdrv {
 
@@ -206,7 +207,22 @@ namespace vrdrv {
       vp.MaxDepth = 1.0f;
       ctx->RSSetViewports(1, &vp);
       for (uint32_t i = 0; i < count; ++i) {
-        const compose_eye_t &L = layers[i].eye[e];
+        const compose_eye_t *eye = &layers[i].eye[e];
+        // §VRDUAL-1A：layer 0 只有一眼有 SRV 時，缺的那眼改畫另一眼的貼圖（含它的投影與 UV）。
+        // 不改呼叫端的 layer。缺 SRV 時 layer0_fills_target 仍回 false，上面已先清成黑色。
+        if (i == 0 && eye->srv == nullptr) {
+          const compose_eye_t &other = layers[0].eye[e ^ 1u];
+          if (other.srv != nullptr) {
+            eye = &other;
+            if (pass == 0) {
+              ++mono_copies_;
+              if (mono_copies_ == 1 || (mono_copies_ % 300ull) == 0) {
+                VRDRV_LOG_WARN("[VIPLE-VR-MONO] layer 0 missing one eye SRV, copied the other eye (count=%llu)", (unsigned long long) mono_copies_);
+              }
+            }
+          }
+        }
+        const compose_eye_t &L = *eye;
         if (!L.srv) {
           continue;
         }

@@ -67,6 +67,7 @@ namespace vrdrv {
     ComPtr<ID3D11RasterizerState> raster_;
     ComPtr<ID3D11DepthStencilState> depth_off_;
     ComPtr<ID3D11Buffer> cb_;
+    uint64_t mono_copies_ = 0;  // §VRDUAL-1A：layer 0 單眼複製的次數（只在 compose 的執行緒）
   };
 
 }  // namespace vrdrv

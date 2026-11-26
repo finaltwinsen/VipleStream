@@ -406,15 +406,27 @@ private:
     void handleStateChange(XrSessionState state);
     void frameThreadMain();
     bool clearImage(VkImage img, float r, float g, float b, float a = 1.0f);
-    // m_Cmd／m_Fence／staging 可以重用了嗎（上一次送出的已完成）；還沒完成就回 false、什麼都不碰
+    // §VRDUAL-2B：兩組上傳槽有一組沒在 GPU 上就回 true（不佔用）。兩組都還 pending 才回 false。
     bool cmdIdle(uint64_t timeoutNs);
     void cmdSubmitted();
+    // §VRDUAL-11A：xrWaitFrame／xrBeginFrame／xrEndFrame 的相位。卡住時看門狗只記 log 並走 onEnded。
+    void watchdogThreadMain();
+    void noteXrPhase(int phase, uint32_t epoch);
+    void clearXrPhase();
+    // §VRDUAL-2B：挑一個沒在用的上傳槽（輪替）。沒有就回 -1，並設 m_ActiveUpload。
+    int acquireUploadSlot(uint64_t timeoutNs);
+    bool peekUploadSlot(uint64_t timeoutNs);
+    bool ensureUploadStaging(int slot, VkDeviceSize bytes);
+    // §VRDUAL-5A：kind 0＝整張、1＝部分列、2＝沒變。約 10 秒印一次 [VIPLE-XR-SHELLUP]。
+    void noteShellUpload(int kind, uint32_t rows);
     // X3：loading／狀態 quad 只清一次色，之後的幀重用最後 release 的影像（a<1 時 rgb 應為預乘值）
     bool ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count, bool* ready, float r, float g, float b,
                          float a = 1.0f);
     // 虛擬鍵盤：把 QImage 經 staging buffer 複製進 swapchain 影像（格式需為 8-bit RGBA／BGRA）
     // §PERF-R3（2026-11-26）：bottomUp＝來源列由下往上（見 setShellImage），抄進 staging 時倒過來
-    bool uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, const QImage& img, bool bottomUp = false);
+    // §VRDUAL-5A：shellIncremental 只給 VR Shell。依「這一張 swapchain image 上次的像素」只上傳有變的列。
+    bool uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, const QImage& img, bool bottomUp = false,
+                     bool shellIncremental = false);
     bool createSolidSwapchain(uint32_t w, uint32_t h, XrSwapchain* sc, VkImage** images, uint32_t* count, const char* what);
     // 每一格呼叫一次；視窗滿了就印 10 s 行並回 true。deferPrint＝這一格已經印過 [VIPLE-VR-LDIAG] 那一組：滿了也先不印，
     // 留到下一格（兩組錯開，見 frameThreadMain 的 §VR-LOGSPLIT）
@@ -470,10 +482,7 @@ private:
     std::atomic<uint64_t> m_KbReadyMask{0};   // bit m＝m_KbCache[m] 已畫好
     QImage m_KbCache[XrKeyboard::kStateCount];
     int m_KbUploadedMods = -1;                // 目前 swapchain 裡是哪一種組合
-    VkBuffer m_Staging = VK_NULL_HANDLE;
-    VkDeviceMemory m_StagingMem = VK_NULL_HANDLE;
-    void* m_StagingPtr = nullptr;
-    VkDeviceSize m_StagingSize = 0;
+    // §VRDUAL-2B：staging 跟 command buffer 一組，見 m_Upload。不再使用單一 m_Staging。
     int64_t m_QuadFormat = 0;
     uint32_t m_QuadImageCount = 0;
     VkImage* m_QuadImages = nullptr;  // new[]，m_QuadImageCount 個
@@ -547,6 +556,19 @@ private:
     VkImage* m_ShellImages = nullptr;
     bool m_ShellUploaded = false;               // frame thread
     bool m_ShellLogged = false;                 // frame thread
+    // §VRDUAL-5A：每張 swapchain image 上次寫入的像素（由上往下、每列 w*4、無 padding）。超過 4 張就每次整張複製。
+    static constexpr uint32_t kShellSnapImages = 4;
+    static constexpr uint32_t kShellStripRows = 32;
+    XrSwapchain m_ShellSnapSc = XR_NULL_HANDLE;
+    uint32_t m_ShellSnapW = 0;
+    uint32_t m_ShellSnapH = 0;
+    std::vector<uint64_t> m_ShellSnap[kShellSnapImages];  // 8 對齊，條帶用 uint64 比對
+    uint64_t m_ShellUpNs = 0;
+    uint32_t m_ShellUpN = 0;
+    uint32_t m_ShellUpFull = 0;
+    uint32_t m_ShellUpPart = 0;
+    uint32_t m_ShellUpSkip = 0;
+    uint64_t m_ShellUpRows = 0;
     mutable std::mutex m_TimingMutex;
     DisplayTiming m_DisplayTiming;              // m_TimingMutex
     XrDesktopScreen* m_Screen = nullptr;  // X3 擺放（frame thread 用；requestRecenter 任何執行緒）
@@ -594,9 +616,20 @@ private:
     std::atomic<bool> m_GpuWedged{false};  // M4a 收尾：GPU 等待逾時（見 waitSemaphoreBounded）
     uint32_t m_VkApiVersion = 0;
     VkCommandPool m_CmdPool = VK_NULL_HANDLE;
-    VkCommandBuffer m_Cmd = VK_NULL_HANDLE;
-    VkFence m_Fence = VK_NULL_HANDLE;
-    bool m_CmdPending = false;      // m_Cmd 已送出、m_Fence 還沒確認完成（只在 frame thread 用）
+    // §VRDUAL-2B：兩組 command buffer、fence、staging。pending 的那組不重錄（turnip 會在重設後崩潰）。
+    struct UploadSlot {
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        bool pending = false;
+        VkBuffer staging = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+        void* stagingPtr = nullptr;
+        VkDeviceSize stagingSize = 0;
+    };
+    static constexpr int kUploadSlots = 2;
+    UploadSlot m_Upload[kUploadSlots];
+    int m_UploadCursor = 0;   // 下一組優先用這一槽（frame thread）
+    int m_ActiveUpload = -1;  // acquireUploadSlot 挑到的槽
     bool m_CmdTimeoutLogged = false;
     std::mutex m_QueueMutex;
     std::vector<const char*> m_DevExts;
@@ -625,6 +658,20 @@ private:
     static void asyncLogSink(const std::string& line);
     xrlog::AsyncLines m_AsyncLog{&XrContext::asyncLogSink};
     std::thread m_FrameThread;
+    std::thread m_WatchdogThread;              // §VRDUAL-11A
+    std::atomic<bool> m_WatchdogStop{false};
+    std::atomic<int> m_XrPhase{0};             // 0 閒置、1 xrWaitFrame、2 xrBeginFrame、3 xrEndFrame
+    std::atomic<uint64_t> m_XrPhaseSinceNs{0};
+    std::atomic<uint32_t> m_XrPhaseEpoch{0};   // §VRDUAL-11A：這次相位屬於哪個 m_FrameEpoch。舊執行緒的解構子不能清掉新的
+    std::atomic<bool> m_XrApiStuck{false};     // 看門狗認定呼叫超過 3 秒；shutdown 改 detach、不銷毀 runtime
+    std::atomic<int> m_XrStuckPhase{0};        // §VRDUAL-11A：觸發當下的相位，detach 那一行用（呼叫返回後 m_XrPhase 會清成 0）
+    std::atomic<uint32_t> m_FrameEpoch{0};     // §VRDUAL-11A：bringUp 重入時加一。已 detach 的舊 frame thread 返回後不要碰新的 session
+    bool m_XrLeakLogged = false;               // §VRDUAL-11A：洩漏 runtime 那一行只印一次（destructor 會再進 shutdown）
+    std::atomic<bool> m_ShutdownStarted{false};
+    static constexpr int kXrPhaseWait = 1;
+    static constexpr int kXrPhaseBegin = 2;
+    static constexpr int kXrPhaseEnd = 3;
+    friend struct XrPhaseScope;
     std::atomic<bool> m_FrameThreadRunning{false};
     std::atomic<bool> m_StopRequested{false};
     std::atomic<bool> m_ExitRequested{false};  // shutdown() 要求 frame thread 走正常退出流程

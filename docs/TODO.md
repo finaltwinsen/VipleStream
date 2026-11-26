@@ -70,11 +70,23 @@
 - **使用者 log 分析（11-25 晚～11-26 早，VITURE＋5070 Ti 那組 9 場；報告 `temp/logdrop_1126/out_go.md`，opencode deepseek）**：
   VR 主線乾淨（loss 0、延遲 p50 12～13 ms）。已修：Android 音訊積壓每包一行 log 改 10 秒彙總、新安裝不再開不存在的舊資料庫（三段 SQLite 堆疊）。
   2.0.289 已修（host 驗過 VR 144 fps、熱點 0.5 s、停服務 0.8 s；Android 已建）：Beast 3D 倒數重試、driver 開場心跳寬限、`expected=<none>` 降級、
-  driver 轉印 log 改用 `(`、logdrop 只上傳本次執行那一段＋檔頭、code 16 文案。**剩**：3840x1080 VR 場被 `cut-trend` 從約 8.3 Mbps 砍到 6.7～7.1
-  （rtt 6 ms、base 1 ms、jit 5 ms）——先核對這場的碼率為何只有 8 Mbps、base 太小時要不要設下限；Beast 倒數要朋友實機確認。
+  driver 轉印 log 改用 `(`、logdrop 只上傳本次執行那一段＋檔頭、code 16 文案。Beast 倒數要朋友實機確認。
+  「8.3 Mbps 被 cut-trend 砍」那場其實是 VR 之後接著開的 BeamNG 2D（1280x720 預設 10 Mbps 扣 FEC／音訊＝8308），不是 VR。
+  據此修了兩項（**未建置、未驗**；單元測試 test_abr_congestion 54 項過）：§ABR-TREND-FLOOR（趨勢過載但膨脹量 < max(6 ms, 抖動) 只暫停回升、
+  不降碼；congestion_t 只用在 2D）、§ABR-DESK-TOPOFF（2D 回升最後一階不到 10% 時 target 頂到上限仍直接套用，不再停在 95%）。
+- **§VRDUAL 借鑑 vrdual 的五項（grok 實作、我審過並修正；2.0.290 已建、host 與頭盔已部署，未提交）**：
+  4A ABI 表改由 `Sunshine/scripts/gen_vr_ipc_abi_table.py` 產生、建置時 `--check`（腳本原本把表頭的巨集定義也當成資料列，
+  檢查永遠失敗，已修；找不到 Python 改成只警告）；7A server／driver build id 經握手的 reserved 欄位比對，不一致只印
+  `[VIPLE-VR-BUILDID]`；1A layer 0 缺一眼 SRV 改畫另一眼（`[VIPLE-VR-MONO]`）；11A 頭盔 xrWaitFrame／BeginFrame／EndFrame 看門狗
+  （審查時改成只在 VISIBLE／FOCUSED 判、門檻 5 秒，免得拿下頭盔待機就斷線）；2B／5A 上傳雙槽＋VR 介面只上傳變動列
+  （`[VIPLE-XR-SHELLUP]`）。無人場次 v290a：144 fps 全收、FOCUSED、看門狗與 build id 都沒誤報。**待驗**：VR 介面增量上傳
+  （`scripts/vr/shell_run.sh`，那時 host 主控台有人在用沒跑）、配戴時拿下頭盔 >10 秒再戴回串流不斷。
 - **Palworld VR（repo 外的 mod 專案）**：UEVR 的交替幀在 Palworld 上右眼全黑（AFW、官方版、OpenXR／OpenVR 都一樣）→ AFW 不可用；
   Native Stereo 正常。VR 每幀 11～14 ms、CPU／GPU 都沒滿（串行等姿態）→ 手動半速（基準 72 Hz）只剩 48 Hz 且不均，全速自然 72～74 Hz；
-  UEVR `VR_SynchronizationMode=0` 讓 p99 17.6→12.8 ms。**下一步**：遊戲動態向量（攔 DLSS／FSR 3.1／XeSS 的輸入）送頭盔補幀，設計稿待寫；
+  UEVR `VR_SynchronizationMode=0` 讓 p99 17.6→12.8 ms。**§VR-SYNTH-AUTO（待做）**：補幀寫死只在手動半速時開
+  （`session.cpp` `xo.pcvrSynth = … && vrHalfRate && …`），但遊戲跟不上時 host 全速模式自然變成每 2 格一張（Palworld 實測頭盔穩定
+  720 新／720 重複每 10 s），這時只是重複顯示 → 改成「新影像穩定在顯示率一半（host cadence divisor 2 或 rate div 2）」時自動開補幀；
+  同一場 MTP p50 約 60 ms、p95 約 115 ms（正常全速約 40），原因待查（host 自然降半時的 latch／預測時間）。**下一步**：遊戲動態向量（攔 DLSS／FSR 3.1／XeSS 的輸入）送頭盔補幀，設計稿待寫；
   一卡一眼暫緩（需要 Linux VR 擷取後端，設計稿 `docs/specs/linux_vr_backend.md` 未審）。
 - **§PERF-R3 第三輪效能／功耗審查**：grok 四份報告（server、桌面 client、Android、頭盔 VR）逐項核實：不改行為的已改進 2.0.286（各處標 `§PERF-R3`）；會改時序的列在下一節待量測。
 

@@ -29,6 +29,7 @@
 #include <cmath>
 #include <limits>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -440,9 +441,21 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     // §REVIEW-1119：上一場留下的中斷／GPU 卡住旗標要在這裡清（shutdown 已經照舊旗標收完舊資源）。原本等到 READY 之後才清：
     // waitForReadyAndBegin 第一圈的 pollEvents 就會因為 m_Lost 還是 true 而失敗，同一個物件永遠起不來；這一次建立失敗時
     // destroyAll 也會把新的 device 當成卡住的而不釋放。目前三個呼叫端都是新建物件，這是讓標頭寫的「可直接再呼叫」成立。
+    // §VRDUAL-11A：上一場若看門狗認定卡住，shutdown 已把舊 runtime 留下。旗標留到這裡才清，destructor 的第二次
+    // shutdown 才不會去銷毀還卡在 xrWaitFrame 裡的 runtime。新的這場要能正常銷毀。
+    // 先把世代加一，已 detach 的舊 frame thread 一返回就離開，不會清掉新執行緒的 m_FrameThreadRunning，也不會呼叫新的 session。
+    m_FrameEpoch.fetch_add(1, std::memory_order_acq_rel);
     m_Lost.store(false);
     m_LostByGpu.store(false, std::memory_order_release);
     m_GpuWedged.store(false, std::memory_order_release);
+    m_XrApiStuck.store(false, std::memory_order_release);
+    m_XrStuckPhase.store(0, std::memory_order_release);
+    m_XrLeakLogged = false;
+    m_ShutdownStarted.store(false, std::memory_order_release);
+    m_WatchdogStop.store(false, std::memory_order_release);
+    m_XrPhase.store(0, std::memory_order_release);
+    m_XrPhaseSinceNs.store(0, std::memory_order_relaxed);
+    m_XrPhaseEpoch.store(0, std::memory_order_relaxed);
 
     QString err;
     // [VIPLE-STARTUP]（A44，量測）：log 的時間戳只到秒，開場的時間點自己帶毫秒。t 是 steady clock 的絕對值，和 session.cpp
@@ -608,6 +621,14 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
     pcvrApplyAb();  // §VR-LATCH A/B：起始的那一邊（切換從「關」開始）；frame thread 還沒起跑
     m_FrameThreadRunning.store(true, std::memory_order_release);
     m_FrameThread = std::thread(&XrContext::frameThreadMain, this);
+    // §VRDUAL-11A：看門狗與 frame thread 一起起。shutdown 先把它停掉，再決定 join 或 detach frame thread。
+    m_WatchdogStop.store(false, std::memory_order_release);
+    m_XrPhase.store(0, std::memory_order_release);
+    m_XrPhaseSinceNs.store(0, std::memory_order_relaxed);
+    m_XrPhaseEpoch.store(0, std::memory_order_relaxed);
+    if (!m_WatchdogThread.joinable()) {
+        m_WatchdogThread = std::thread(&XrContext::watchdogThreadMain, this);
+    }
 
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     // 虛擬鍵盤貼圖：背景執行緒先畫無修飾鍵版本（暖字型，不阻塞 bring-up 與 XR thread）。
@@ -831,13 +852,23 @@ bool XrContext::createVulkan(QString* error)
 void XrContext::destroyVulkanObjects()
 {
     if (m_VkDevice != VK_NULL_HANDLE) {
-        if (m_Fence != VK_NULL_HANDLE && s_Vk.DestroyFence) s_Vk.DestroyFence(m_VkDevice, m_Fence, nullptr);
+        // §VRDUAL-2B：兩組 fence。command buffer 跟著 pool 一起銷毀。
+        if (s_Vk.DestroyFence) {
+            for (UploadSlot& u : m_Upload) {
+                if (u.fence != VK_NULL_HANDLE) {
+                    s_Vk.DestroyFence(m_VkDevice, u.fence, nullptr);
+                }
+            }
+        }
         if (m_CmdPool != VK_NULL_HANDLE && s_Vk.DestroyCommandPool) s_Vk.DestroyCommandPool(m_VkDevice, m_CmdPool, nullptr);
         if (s_Vk.DestroyDevice) s_Vk.DestroyDevice(m_VkDevice, nullptr);
     }
-    m_Fence = VK_NULL_HANDLE;
+    for (UploadSlot& u : m_Upload) {
+        u.fence = VK_NULL_HANDLE;
+        u.cmd = VK_NULL_HANDLE;
+        u.pending = false;
+    }
     m_CmdPool = VK_NULL_HANDLE;
-    m_Cmd = VK_NULL_HANDLE;
     m_VkDevice = VK_NULL_HANDLE;
     m_Queue = VK_NULL_HANDLE;
     if (m_VkInstance != VK_NULL_HANDLE && s_Vk.DestroyInstance) {
@@ -1189,15 +1220,20 @@ bool XrContext::createVulkanAt(QString* error, bool pyroWave13)
     VkCommandBufferAllocateInfo cai = vkStruct<VkCommandBufferAllocateInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO);
     cai.commandPool = m_CmdPool;
     cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cai.commandBufferCount = 1;
-    if (s_Vk.AllocateCommandBuffers(m_VkDevice, &cai, &m_Cmd) != VK_SUCCESS) {
+    cai.commandBufferCount = kUploadSlots;  // §VRDUAL-2B
+    VkCommandBuffer cmds[kUploadSlots] = {};
+    if (s_Vk.AllocateCommandBuffers(m_VkDevice, &cai, cmds) != VK_SUCCESS) {
         *error = QStringLiteral("vkAllocateCommandBuffers failed");
         return false;
     }
     VkFenceCreateInfo fci = vkStruct<VkFenceCreateInfo>(VK_STRUCTURE_TYPE_FENCE_CREATE_INFO);
-    if (s_Vk.CreateFence(m_VkDevice, &fci, nullptr, &m_Fence) != VK_SUCCESS) {
-        *error = QStringLiteral("vkCreateFence failed");
-        return false;
+    for (int i = 0; i < kUploadSlots; i++) {
+        m_Upload[i].cmd = cmds[i];
+        m_Upload[i].pending = false;
+        if (s_Vk.CreateFence(m_VkDevice, &fci, nullptr, &m_Upload[i].fence) != VK_SUCCESS) {
+            *error = QStringLiteral("vkCreateFence failed");
+            return false;
+        }
     }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -1704,53 +1740,241 @@ void XrContext::handleStateChange(XrSessionState state)
 
 // ── frame thread ──
 
-// m_Cmd 只有一個：上一次送出的沒確認完成就重錄／重設 fence，頭盔驅動（turnip）的送出執行緒之後讀到被重設的
-// command buffer 會在 tu_autotune::on_submit 崩潰（2026-11-02 查：使用者「影片播到一半程式直接重啟」，
-// 9 個 coredump 全是這個位置）。以前等 1 s 逾時就照樣重設；現在逾時就保持 pending，這段期間的上傳先跳過
-bool XrContext::cmdIdle(uint64_t timeoutNs)
+namespace {
+// §VRDUAL-5A：兩邊都 8 對齊、長度是 8 的倍數才用 uint64 比；否則 memcmp（QImage 的 scanline 不一定 8 對齊）。
+bool vipleSpanDiffers(const void* a, const void* b, size_t n)
 {
-    if (!m_CmdPending) {
-        return true;
-    }
-    const uint64_t t0 = steadyNowNs();
-    const VkResult r = s_Vk.WaitForFences(m_VkDevice, 1, &m_Fence, VK_TRUE, timeoutNs);
-    if (r != VK_SUCCESS) {
-        // §REVIEW-1104：VK_ERROR_DEVICE_LOST 只留 pending 不會走 session loss，這裡要標 GPU wedged
-        if (r == VK_ERROR_DEVICE_LOST) {
-            markGpuWedged("upload fence wait returned VK_ERROR_DEVICE_LOST");
-        }
-        if (!m_CmdTimeoutLogged) {
-            m_CmdTimeoutLogged = true;
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "[VIPLE-XR] upload command buffer still pending after %.0f ms (vk=%d) - not reusing it, uploads skipped until it completes",
-                        static_cast<double>(steadyNowNs() - t0) / 1e6, static_cast<int>(r));
+    const auto pa = reinterpret_cast<uintptr_t>(a);
+    const auto pb = reinterpret_cast<uintptr_t>(b);
+    if (((pa | pb) & 7u) == 0 && (n & 7u) == 0) {
+        const auto* wa = static_cast<const uint64_t*>(a);
+        const auto* wb = static_cast<const uint64_t*>(b);
+        const size_t words = n / 8;
+        for (size_t i = 0; i < words; i++) {
+            if (wa[i] != wb[i]) {
+                return true;
+            }
         }
         return false;
     }
-    s_Vk.ResetFences(m_VkDevice, 1, &m_Fence);
-    m_CmdPending = false;
-    if (m_CmdTimeoutLogged) {
-        m_CmdTimeoutLogged = false;
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] upload command buffer completed, uploads resume");
+    return n != 0 && std::memcmp(a, b, n) != 0;
+}
+
+// 相位數字與 XrContext::kXrPhaseBegin／kXrPhaseEnd 相同（那兩個是 private，這裡不能引用）。
+const char* vipleXrApiName(int phase)
+{
+    if (phase == 2) {
+        return "xrBeginFrame";
     }
+    if (phase == 3) {
+        return "xrEndFrame";
+    }
+    return "xrWaitFrame";
+}
+}  // namespace
+
+// §VRDUAL-2B：兩組上傳槽。上一組送出的沒確認完成就重錄／重設 fence，頭盔驅動（turnip）的送出執行緒之後讀到被重設的
+// command buffer 會在 tu_autotune::on_submit 崩潰（2026-11-02）。兩組都還 pending 才跳過上傳；有一組空的就用那一組，
+// 不再每次送出後在 CPU 上等最多 1 秒。字串維持原本的 [VIPLE-XR] upload command buffer still pending，方便舊 log 搜尋。
+bool XrContext::peekUploadSlot(uint64_t timeoutNs)
+{
+    bool anyFree = false;
+    int firstPending = -1;
+    for (int i = 0; i < kUploadSlots; i++) {
+        const UploadSlot& u = m_Upload[i];
+        if (u.cmd == VK_NULL_HANDLE || u.fence == VK_NULL_HANDLE) {
+            continue;
+        }
+        if (!u.pending) {
+            anyFree = true;
+        }
+        else if (firstPending < 0) {
+            firstPending = i;
+        }
+    }
+    if (anyFree) {
+        if (m_CmdTimeoutLogged) {
+            m_CmdTimeoutLogged = false;
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] upload command buffer completed, uploads resume");
+        }
+        return true;
+    }
+    if (firstPending < 0 || s_Vk.WaitForFences == nullptr) {
+        return false;
+    }
+    const uint64_t t0 = steadyNowNs();
+    VkResult last = VK_TIMEOUT;
+    bool sawFail = false;
+    for (int n = 0; n < kUploadSlots; n++) {
+        const int i = (firstPending + n) % kUploadSlots;
+        UploadSlot& u = m_Upload[i];
+        if (!u.pending || u.fence == VK_NULL_HANDLE) {
+            continue;
+        }
+        const uint64_t wait = sawFail ? 0 : timeoutNs;
+        const VkResult r = s_Vk.WaitForFences(m_VkDevice, 1, &u.fence, VK_TRUE, wait);
+        if (r == VK_SUCCESS) {
+            if (m_CmdTimeoutLogged) {
+                m_CmdTimeoutLogged = false;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] upload command buffer completed, uploads resume");
+            }
+            return true;  // 不 ResetFences、不改 pending：acquireUploadSlot 才佔用
+        }
+        sawFail = true;
+        last = r;
+        if (r == VK_ERROR_DEVICE_LOST) {
+            markGpuWedged("upload fence wait returned VK_ERROR_DEVICE_LOST");
+            break;
+        }
+    }
+    if (!m_CmdTimeoutLogged) {
+        m_CmdTimeoutLogged = true;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] upload command buffer still pending after %.0f ms (vk=%d) - not reusing it, uploads skipped until it completes",
+                    static_cast<double>(steadyNowNs() - t0) / 1e6, static_cast<int>(last));
+    }
+    return false;
+}
+
+int XrContext::acquireUploadSlot(uint64_t timeoutNs)
+{
+    bool usedTimeout = false;
+    VkResult last = VK_TIMEOUT;
+    const uint64_t t0 = steadyNowNs();
+    for (int n = 0; n < kUploadSlots; n++) {
+        const int i = (m_UploadCursor + n) % kUploadSlots;
+        UploadSlot& u = m_Upload[i];
+        if (u.cmd == VK_NULL_HANDLE || u.fence == VK_NULL_HANDLE) {
+            continue;
+        }
+        if (u.pending) {
+            if (s_Vk.WaitForFences == nullptr) {
+                continue;
+            }
+            const uint64_t wait = usedTimeout ? 0 : timeoutNs;
+            usedTimeout = true;
+            const VkResult r = s_Vk.WaitForFences(m_VkDevice, 1, &u.fence, VK_TRUE, wait);
+            if (r == VK_ERROR_DEVICE_LOST) {
+                markGpuWedged("upload fence wait returned VK_ERROR_DEVICE_LOST");
+                m_ActiveUpload = -1;
+                return -1;
+            }
+            if (r != VK_SUCCESS) {
+                last = r;
+                continue;
+            }
+            // fence 已 signaled 才能重設再送。沒有 ResetFences 就不能重用這一槽。
+            if (s_Vk.ResetFences == nullptr) {
+                last = r;
+                continue;
+            }
+            s_Vk.ResetFences(m_VkDevice, 1, &u.fence);
+            u.pending = false;
+            if (m_CmdTimeoutLogged) {
+                m_CmdTimeoutLogged = false;
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] upload command buffer completed, uploads resume");
+            }
+        }
+        m_UploadCursor = (i + 1) % kUploadSlots;
+        m_ActiveUpload = i;
+        return i;
+    }
+    if (!m_CmdTimeoutLogged) {
+        m_CmdTimeoutLogged = true;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR] upload command buffer still pending after %.0f ms (vk=%d) - not reusing it, uploads skipped until it completes",
+                    static_cast<double>(steadyNowNs() - t0) / 1e6, static_cast<int>(last));
+    }
+    m_ActiveUpload = -1;
+    return -1;
+}
+
+bool XrContext::ensureUploadStaging(int slot, VkDeviceSize bytes)
+{
+    if (slot < 0 || slot >= kUploadSlots || bytes == 0 || s_Vk.CreateBuffer == nullptr) {
+        return false;
+    }
+    UploadSlot& u = m_Upload[slot];
+    // 另一槽可能還 pending；只改這一槽（acquire 保證它沒在 GPU 上）。
+    if (u.pending) {
+        return false;
+    }
+    if (u.staging != VK_NULL_HANDLE && u.stagingPtr != nullptr && u.stagingSize >= bytes) {
+        return true;
+    }
+    if (u.staging != VK_NULL_HANDLE) {
+        s_Vk.UnmapMemory(m_VkDevice, u.stagingMem);
+        s_Vk.DestroyBuffer(m_VkDevice, u.staging, nullptr);
+        s_Vk.FreeMemory(m_VkDevice, u.stagingMem, nullptr);
+        u.staging = VK_NULL_HANDLE;
+        u.stagingMem = VK_NULL_HANDLE;
+        u.stagingPtr = nullptr;
+        u.stagingSize = 0;
+    }
+    VkBufferCreateInfo bci = vkStruct<VkBufferCreateInfo>(VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
+    bci.size = bytes;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (s_Vk.CreateBuffer(m_VkDevice, &bci, nullptr, &u.staging) != VK_SUCCESS) {
+        u.staging = VK_NULL_HANDLE;
+        return false;
+    }
+    VkMemoryRequirements req = {};
+    s_Vk.GetBufferMemoryRequirements(m_VkDevice, u.staging, &req);
+    VkPhysicalDeviceMemoryProperties mp = {};
+    s_Vk.GetPhysicalDeviceMemoryProperties(m_VkPhysicalDevice, &mp);
+    uint32_t type = UINT32_MAX;
+    const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (uint32_t t = 0; t < mp.memoryTypeCount; t++) {
+        if ((req.memoryTypeBits & (1u << t)) && (mp.memoryTypes[t].propertyFlags & want) == want) {
+            type = t;
+            break;
+        }
+    }
+    VkMemoryAllocateInfo mai = vkStruct<VkMemoryAllocateInfo>(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO);
+    mai.allocationSize = req.size;
+    mai.memoryTypeIndex = type;
+    if (type == UINT32_MAX || s_Vk.AllocateMemory(m_VkDevice, &mai, nullptr, &u.stagingMem) != VK_SUCCESS ||
+        s_Vk.BindBufferMemory(m_VkDevice, u.staging, u.stagingMem, 0) != VK_SUCCESS ||
+        s_Vk.MapMemory(m_VkDevice, u.stagingMem, 0, VK_WHOLE_SIZE, 0, &u.stagingPtr) != VK_SUCCESS) {
+        if (u.stagingMem != VK_NULL_HANDLE) {
+            s_Vk.FreeMemory(m_VkDevice, u.stagingMem, nullptr);
+        }
+        s_Vk.DestroyBuffer(m_VkDevice, u.staging, nullptr);
+        u.staging = VK_NULL_HANDLE;
+        u.stagingMem = VK_NULL_HANDLE;
+        u.stagingPtr = nullptr;
+        return false;
+    }
+    u.stagingSize = bytes;
     return true;
+}
+
+bool XrContext::cmdIdle(uint64_t timeoutNs)
+{
+    return peekUploadSlot(timeoutNs);
 }
 
 void XrContext::cmdSubmitted()
 {
-    m_CmdPending = true;
-    cmdIdle(1000000000ull);  // 照舊同步等（最多 1 s）；逾時就留著 pending，下次用之前再確認
+    // §VRDUAL-2B：不再在這裡等 fence。runtime 在 xrReleaseSwapchainImage 之後自己等這條 queue 上的工作。
+    if (m_ActiveUpload >= 0 && m_ActiveUpload < kUploadSlots) {
+        m_Upload[m_ActiveUpload].pending = true;
+    }
 }
 
 bool XrContext::clearImage(VkImage img, float r, float g, float b, float a)
 {
-    if (!cmdIdle(0)) {
+    // §VRDUAL-2B：整張清色仍走 UNDEFINED（舊內容丟掉）。槽由 acquire 挑，不重設還在飛的那一組。
+    const int slot = acquireUploadSlot(0);
+    if (slot < 0) {
         return false;
     }
-    s_Vk.ResetCommandBuffer(m_Cmd, 0);
+    UploadSlot& u = m_Upload[slot];
+    s_Vk.ResetCommandBuffer(u.cmd, 0);
     VkCommandBufferBeginInfo bi = vkStruct<VkCommandBufferBeginInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    s_Vk.BeginCommandBuffer(m_Cmd, &bi);
+    s_Vk.BeginCommandBuffer(u.cmd, &bi);
 
     VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     // XR_KHR_vulkan_enable：acquire 後影像在 COLOR_ATTACHMENT_OPTIMAL，release 前也要回到這個 layout
@@ -1763,7 +1987,7 @@ bool XrContext::clearImage(VkImage img, float r, float g, float b, float a)
     bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bar.image = img;
     bar.subresourceRange = range;
-    s_Vk.CmdPipelineBarrier(m_Cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    s_Vk.CmdPipelineBarrier(u.cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                             0, 0, nullptr, 0, nullptr, 1, &bar);
 
     VkClearColorValue gray;
@@ -1772,23 +1996,23 @@ bool XrContext::clearImage(VkImage img, float r, float g, float b, float a)
     gray.float32[1] = g;
     gray.float32[2] = b;
     gray.float32[3] = a;
-    s_Vk.CmdClearColorImage(m_Cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &gray, 1, &range);
+    s_Vk.CmdClearColorImage(u.cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &gray, 1, &range);
 
     bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     bar.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
     bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     bar.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    s_Vk.CmdPipelineBarrier(m_Cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+    s_Vk.CmdPipelineBarrier(u.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                             0, 0, nullptr, 0, nullptr, 1, &bar);
-    s_Vk.EndCommandBuffer(m_Cmd);
+    s_Vk.EndCommandBuffer(u.cmd);
 
     VkSubmitInfo si = vkStruct<VkSubmitInfo>(VK_STRUCTURE_TYPE_SUBMIT_INFO);
     si.commandBufferCount = 1;
-    si.pCommandBuffers = &m_Cmd;
+    si.pCommandBuffers = &u.cmd;
     VkResult vr;
     {
         std::lock_guard<std::mutex> lk(m_QueueMutex);
-        vr = s_Vk.QueueSubmit(m_Queue, 1, &si, m_Fence);
+        vr = s_Vk.QueueSubmit(m_Queue, 1, &si, u.fence);
     }
     if (vr != VK_SUCCESS) {
         return false;
@@ -1864,7 +2088,8 @@ bool XrContext::ensureSolidQuad(XrSwapchain sc, VkImage* images, uint32_t count,
         xrReleaseSwapchainImage(sc, &ri);
     }
     // §REVIEW-1104：fence 回 device lost 時純色沒畫完，不要設 *ready；submit 已成功仍回傳 true，避免圖層被藏
-    if (drawn && m_CmdPending && gpuWedged()) {
+    // §VRDUAL-2B：cmdSubmitted 不再等 fence，device lost 是 acquire 當下標的。
+    if (drawn && gpuWedged()) {
         return true;
     }
     *ready = drawn;
@@ -1900,15 +2125,44 @@ void XrContext::keyboardRenderThreadMain()
     }
 }
 
-bool XrContext::uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, const QImage& src, bool bottomUp)
+void XrContext::noteShellUpload(int kind, uint32_t rows)
+{
+    // §VRDUAL-5A：約 10 秒一行。uploads＝full＋partial＋skipped；rows 是實際抄進 staging 的列（整張算全部列）。
+    const uint64_t now = steadyNowNs();
+    if (m_ShellUpNs == 0) {
+        m_ShellUpNs = now;
+    }
+    m_ShellUpN++;
+    if (kind == 0) {
+        m_ShellUpFull++;
+    }
+    else if (kind == 1) {
+        m_ShellUpPart++;
+    }
+    else {
+        m_ShellUpSkip++;
+    }
+    m_ShellUpRows += rows;
+    if (now - m_ShellUpNs < 10000000000ull) {
+        return;
+    }
+    const uint32_t uploads = m_ShellUpFull + m_ShellUpPart + m_ShellUpSkip;
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-XR-SHELLUP] uploads=%u full=%u partial=%u skipped=%u rows=%llu",
+                uploads, m_ShellUpFull, m_ShellUpPart, m_ShellUpSkip,
+                static_cast<unsigned long long>(m_ShellUpRows));
+    m_ShellUpNs = now;
+    m_ShellUpN = m_ShellUpFull = m_ShellUpPart = m_ShellUpSkip = 0;
+    m_ShellUpRows = 0;
+}
+
+bool XrContext::uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, const QImage& src, bool bottomUp,
+                            bool shellIncremental)
 {
     const bool bgra = m_QuadFormat == VK_FORMAT_B8G8R8A8_SRGB || m_QuadFormat == VK_FORMAT_B8G8R8A8_UNORM;
     const bool rgba = m_QuadFormat == VK_FORMAT_R8G8B8A8_SRGB || m_QuadFormat == VK_FORMAT_R8G8B8A8_UNORM;
     if (sc == XR_NULL_HANDLE || images == nullptr || (!bgra && !rgba) || s_Vk.CreateBuffer == nullptr) {
         return false;
-    }
-    if (!cmdIdle(0)) {
-        return false;  // 上一次的複製還在 GPU 上：staging 與 m_Cmd 都不能動
     }
     // Format_ARGB32 在記憶體裡是 B,G,R,A（little-endian）；UNORM 格式會被 runtime 當線性值（稍亮），SRGB 正確
     // §REVIEW-1104：來源已是預乘 ARGB32 時維持預乘，避免 SOURCE_ALPHA 把半透明邊緣除回成發白
@@ -1918,58 +2172,26 @@ bool XrContext::uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, con
     const uint32_t w = static_cast<uint32_t>(img.width());
     const uint32_t h = static_cast<uint32_t>(img.height());
     const VkDeviceSize size = static_cast<VkDeviceSize>(w) * h * 4;
-    if (m_StagingSize < size) {
-        if (m_Staging != VK_NULL_HANDLE) {
-            s_Vk.UnmapMemory(m_VkDevice, m_StagingMem);
-            s_Vk.DestroyBuffer(m_VkDevice, m_Staging, nullptr);
-            s_Vk.FreeMemory(m_VkDevice, m_StagingMem, nullptr);
-            m_Staging = VK_NULL_HANDLE;
-            m_StagingMem = VK_NULL_HANDLE;
-            m_StagingPtr = nullptr;
-            m_StagingSize = 0;
-        }
-        VkBufferCreateInfo bci = vkStruct<VkBufferCreateInfo>(VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
-        bci.size = size;
-        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (s_Vk.CreateBuffer(m_VkDevice, &bci, nullptr, &m_Staging) != VK_SUCCESS) {
-            m_Staging = VK_NULL_HANDLE;
-            return false;
-        }
-        VkMemoryRequirements req = {};
-        s_Vk.GetBufferMemoryRequirements(m_VkDevice, m_Staging, &req);
-        VkPhysicalDeviceMemoryProperties mp = {};
-        s_Vk.GetPhysicalDeviceMemoryProperties(m_VkPhysicalDevice, &mp);
-        uint32_t type = UINT32_MAX;
-        const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        for (uint32_t t = 0; t < mp.memoryTypeCount; t++) {
-            if ((req.memoryTypeBits & (1u << t)) && (mp.memoryTypes[t].propertyFlags & want) == want) {
-                type = t;
-                break;
-            }
-        }
-        VkMemoryAllocateInfo mai = vkStruct<VkMemoryAllocateInfo>(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO);
-        mai.allocationSize = req.size;
-        mai.memoryTypeIndex = type;
-        if (type == UINT32_MAX || s_Vk.AllocateMemory(m_VkDevice, &mai, nullptr, &m_StagingMem) != VK_SUCCESS ||
-            s_Vk.BindBufferMemory(m_VkDevice, m_Staging, m_StagingMem, 0) != VK_SUCCESS ||
-            s_Vk.MapMemory(m_VkDevice, m_StagingMem, 0, VK_WHOLE_SIZE, 0, &m_StagingPtr) != VK_SUCCESS) {
-            if (m_StagingMem != VK_NULL_HANDLE) {
-                s_Vk.FreeMemory(m_VkDevice, m_StagingMem, nullptr);
-            }
-            s_Vk.DestroyBuffer(m_VkDevice, m_Staging, nullptr);
-            m_Staging = VK_NULL_HANDLE;
-            m_StagingMem = VK_NULL_HANDLE;
-            m_StagingPtr = nullptr;
-            return false;
-        }
-        m_StagingSize = size;
+    if (w == 0 || h == 0 || img.isNull() || size == 0) {
+        return false;
     }
-    for (uint32_t y = 0; y < h; y++) {
-        // §PERF-R3（2026-11-26）：bottomUp 的來源在這裡倒著抄（staging 第 y 列＝畫面由上數第 y 列），結果與先翻再抄逐位元相同
+    // §PERF-R3（2026-11-26）：bottomUp 的來源在這裡倒著抄（staging 第 y 列＝畫面由上數第 y 列）
+    auto srcAt = [&](uint32_t y) -> const uint8_t* {
         const int srcRow = bottomUp ? static_cast<int>(h - 1 - y) : static_cast<int>(y);
-        std::memcpy(static_cast<uint8_t*>(m_StagingPtr) + static_cast<size_t>(y) * w * 4, img.constScanLine(srcRow),
-                    static_cast<size_t>(w) * 4);
+        return img.constScanLine(srcRow);
+    };
+    // §VRDUAL-2B：鍵盤、字幕等整張上傳先佔一槽。兩槽都還在 GPU 上就不 acquire swapchain。
+    // shell 要等知道「哪一張 image、有沒有變」才佔槽：沒變時兩槽都忙也要能成功。
+    int slot = -1;
+    if (!shellIncremental) {
+        slot = acquireUploadSlot(0);
+        if (slot < 0 || !ensureUploadStaging(slot, size)) {
+            return false;
+        }
+        uint8_t* dstBytes = static_cast<uint8_t*>(m_Upload[slot].stagingPtr);
+        for (uint32_t y = 0; y < h; y++) {
+            std::memcpy(dstBytes + static_cast<size_t>(y) * w * 4, srcAt(y), static_cast<size_t>(w) * 4);
+        }
     }
 
     uint32_t idx = 0;
@@ -1998,52 +2220,170 @@ bool XrContext::uploadImage(XrSwapchain sc, VkImage* images, uint32_t count, con
         xrReleaseSwapchainImage(sc, &failedRi);
         return false;
     }
-    bool ok = idx < count;
-    if (ok) {
-        const VkImage dst = images[idx];
-        s_Vk.ResetCommandBuffer(m_Cmd, 0);
-        VkCommandBufferBeginInfo bi = vkStruct<VkCommandBufferBeginInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
-        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        s_Vk.BeginCommandBuffer(m_Cmd, &bi);
-        VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        VkImageMemoryBarrier bar = vkStruct<VkImageMemoryBarrier>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
-        bar.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        bar.image = dst;
-        bar.subresourceRange = range;
-        s_Vk.CmdPipelineBarrier(m_Cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                0, 0, nullptr, 0, nullptr, 1, &bar);
+    auto releaseSc = [&]() {
+        std::lock_guard<std::mutex> lk(m_QueueMutex);
+        xrReleaseSwapchainImage(sc, &ri);
+    };
+    if (idx >= count) {
+        releaseSc();
+        return false;
+    }
+
+    // §VRDUAL-5A：快照是這一張 swapchain image 上次寫進去的像素（由上往下、沒有 padding）。
+    // 超過 4 張或這張的索引 >= 4 就每次整張複製、不記快照。條帶 32 列；整張都變則一筆 UNDEFINED。
+    bool full = true;
+    uint32_t copiedRows = h;
+    struct Strip {
+        uint32_t y;
+        uint32_t rows;
+    };
+    std::vector<Strip> strips;
+    const bool track = shellIncremental && count <= kShellSnapImages && idx < kShellSnapImages;
+    if (shellIncremental) {
+        if (sc != m_ShellSnapSc || w != m_ShellSnapW || h != m_ShellSnapH) {
+            m_ShellSnapSc = sc;
+            m_ShellSnapW = w;
+            m_ShellSnapH = h;
+            for (auto& snap : m_ShellSnap) {
+                snap.clear();
+            }
+        }
+        const bool haveSnap = track && m_ShellSnap[idx].size() * sizeof(uint64_t) >= static_cast<size_t>(size);
+        if (haveSnap) {
+            const uint8_t* snapBase = reinterpret_cast<const uint8_t*>(m_ShellSnap[idx].data());
+            uint32_t dirtyRows = 0;
+            for (uint32_t y = 0; y < h;) {
+                const uint32_t stripH = (std::min)(kShellStripRows, h - y);
+                bool dirty = false;
+                for (uint32_t row = 0; row < stripH; row++) {
+                    const uint32_t yy = y + row;
+                    if (vipleSpanDiffers(snapBase + static_cast<size_t>(yy) * w * 4, srcAt(yy), static_cast<size_t>(w) * 4)) {
+                        dirty = true;
+                        break;
+                    }
+                }
+                if (dirty) {
+                    strips.push_back(Strip{y, stripH});
+                    dirtyRows += stripH;
+                }
+                y += stripH;
+            }
+            if (strips.empty()) {
+                releaseSc();
+                noteShellUpload(2, 0);
+                return true;
+            }
+            if (dirtyRows < h) {
+                full = false;
+                copiedRows = dirtyRows;
+            }
+            else {
+                strips.clear();
+            }
+        }
+        slot = acquireUploadSlot(0);
+        if (slot < 0 || !ensureUploadStaging(slot, size)) {
+            releaseSc();
+            return false;
+        }
+        uint8_t* dstBytes = static_cast<uint8_t*>(m_Upload[slot].stagingPtr);
+        if (full) {
+            for (uint32_t y = 0; y < h; y++) {
+                std::memcpy(dstBytes + static_cast<size_t>(y) * w * 4, srcAt(y), static_cast<size_t>(w) * 4);
+            }
+            copiedRows = h;
+        }
+        else {
+            for (const Strip& s : strips) {
+                for (uint32_t row = 0; row < s.rows; row++) {
+                    const uint32_t yy = s.y + row;
+                    std::memcpy(dstBytes + static_cast<size_t>(yy) * w * 4, srcAt(yy), static_cast<size_t>(w) * 4);
+                }
+            }
+        }
+    }
+    if (slot < 0) {
+        releaseSc();
+        return false;
+    }
+
+    const VkImage dst = images[idx];
+    UploadSlot& u = m_Upload[slot];
+    std::vector<VkBufferImageCopy> regions;
+    if (full) {
         VkBufferImageCopy region = {};
         region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         region.imageExtent = {w, h, 1};
-        s_Vk.CmdCopyBufferToImage(m_Cmd, m_Staging, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-        bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        bar.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-        bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        bar.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        s_Vk.CmdPipelineBarrier(m_Cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                0, 0, nullptr, 0, nullptr, 1, &bar);
-        s_Vk.EndCommandBuffer(m_Cmd);
-        VkSubmitInfo si = vkStruct<VkSubmitInfo>(VK_STRUCTURE_TYPE_SUBMIT_INFO);
-        si.commandBufferCount = 1;
-        si.pCommandBuffers = &m_Cmd;
-        VkResult vr;
-        {
-            std::lock_guard<std::mutex> lk(m_QueueMutex);
-            vr = s_Vk.QueueSubmit(m_Queue, 1, &si, m_Fence);
-        }
-        ok = vr == VK_SUCCESS;
-        if (ok) {
-            cmdSubmitted();
+        regions.push_back(region);
+    }
+    else {
+        regions.reserve(strips.size());
+        for (const Strip& s : strips) {
+            VkBufferImageCopy region = {};
+            region.bufferOffset = static_cast<VkDeviceSize>(s.y) * w * 4;
+            region.bufferRowLength = 0;
+            region.bufferImageHeight = 0;
+            region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            region.imageOffset = {0, static_cast<int32_t>(s.y), 0};
+            region.imageExtent = {w, s.rows, 1};
+            regions.push_back(region);
         }
     }
+    s_Vk.ResetCommandBuffer(u.cmd, 0);
+    VkCommandBufferBeginInfo bi = vkStruct<VkCommandBufferBeginInfo>(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    s_Vk.BeginCommandBuffer(u.cmd, &bi);
+    VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier bar = vkStruct<VkImageMemoryBarrier>(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER);
+    bar.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    // §VRDUAL-5A：部分列用 COLOR_ATTACHMENT_OPTIMAL（acquire 之後的 layout），沒複製的列才留得住。
+    // 第一次寫入與整張重寫用 UNDEFINED，跟改之前一樣把其餘內容丟掉。
+    bar.oldLayout = full ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.image = dst;
+    bar.subresourceRange = range;
+    s_Vk.CmdPipelineBarrier(u.cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            0, 0, nullptr, 0, nullptr, 1, &bar);
+    s_Vk.CmdCopyBufferToImage(u.cmd, u.staging, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                              static_cast<uint32_t>(regions.size()), regions.data());
+    bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    bar.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    bar.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    s_Vk.CmdPipelineBarrier(u.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            0, 0, nullptr, 0, nullptr, 1, &bar);
+    s_Vk.EndCommandBuffer(u.cmd);
+    VkSubmitInfo si = vkStruct<VkSubmitInfo>(VK_STRUCTURE_TYPE_SUBMIT_INFO);
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &u.cmd;
+    VkResult vr;
     {
         std::lock_guard<std::mutex> lk(m_QueueMutex);
-        xrReleaseSwapchainImage(sc, &ri);
+        vr = s_Vk.QueueSubmit(m_Queue, 1, &si, u.fence);
+    }
+    const bool ok = vr == VK_SUCCESS;
+    if (ok) {
+        cmdSubmitted();
+    }
+    releaseSc();
+    if (shellIncremental && ok) {
+        // 超過 4 張就不記快照，但仍算進 10 秒彙總（整張複製）。
+        if (track) {
+            auto& snap = m_ShellSnap[idx];
+            const size_t bytes = static_cast<size_t>(size);
+            snap.assign((bytes + 7) / 8, 0);
+            uint8_t* packed = reinterpret_cast<uint8_t*>(snap.data());
+            for (uint32_t y = 0; y < h; y++) {
+                std::memcpy(packed + static_cast<size_t>(y) * w * 4, srcAt(y), static_cast<size_t>(w) * 4);
+            }
+        }
+        noteShellUpload(full ? 0 : 1, copiedRows);
+    }
+    else if (shellIncremental && track) {
+        m_ShellSnap[idx].clear();  // 這張可能沒寫完，下次整張重寫
     }
     return ok;
 }
@@ -2239,6 +2579,88 @@ bool renderPoseUsable(const float renderRot[4], const float renderPos[3])
 }
 }  // namespace
 
+// §VRDUAL-11A：friend。只包住 xrWaitFrame／xrBeginFrame／xrEndFrame 本體，返回（含例外）就清相位。
+struct XrPhaseScope {
+    XrContext* self;
+    uint32_t epoch;
+    bool armed;
+    explicit XrPhaseScope(XrContext* ctx, int phase)
+        : self(ctx), epoch(ctx->m_FrameEpoch.load(std::memory_order_acquire)), armed(false) {
+        // 世代已經換了就不寫相位，避免蓋掉新的 frame thread。
+        if (self->m_FrameEpoch.load(std::memory_order_acquire) != epoch) {
+            return;
+        }
+        self->noteXrPhase(phase, epoch);
+        armed = self->m_FrameEpoch.load(std::memory_order_acquire) == epoch;
+    }
+    ~XrPhaseScope() {
+        // 只清自己這一代的相位。bringUp 重入之後，新的執行緒可能已經在等下一個 OpenXR 呼叫。
+        if (armed && self->m_FrameEpoch.load(std::memory_order_acquire) == epoch) {
+            self->clearXrPhase();
+        }
+    }
+    XrPhaseScope(const XrPhaseScope&) = delete;
+    XrPhaseScope& operator=(const XrPhaseScope&) = delete;
+};
+
+void XrContext::noteXrPhase(int phase, uint32_t epoch)
+{
+    // vipleXrApiName 在類別外面，用 1／2／3 對這三個相位。改了數字兩邊要一起改。
+    static_assert(kXrPhaseWait == 1 && kXrPhaseBegin == 2 && kXrPhaseEnd == 3, "xr phase ids");
+    // 先寫時刻與世代、再 release 相位。看門狗 acquire 到非 0 之後讀到的才是這一次。
+    m_XrPhaseSinceNs.store(steadyNowNs(), std::memory_order_relaxed);
+    m_XrPhaseEpoch.store(epoch, std::memory_order_relaxed);
+    m_XrPhase.store(phase, std::memory_order_release);
+}
+
+void XrContext::clearXrPhase()
+{
+    m_XrPhase.store(0, std::memory_order_release);
+}
+
+void XrContext::watchdogThreadMain()
+{
+    while (!m_WatchdogStop.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        if (m_WatchdogStop.load(std::memory_order_acquire)) {
+            break;
+        }
+        const int phase = m_XrPhase.load(std::memory_order_acquire);
+        // 相位屬於上一場（已 detach）的話略過，避免新的這場剛起來就被看成卡住。
+        if (phase == 0 || m_XrPhaseEpoch.load(std::memory_order_relaxed) != m_FrameEpoch.load(std::memory_order_acquire) ||
+            m_XrApiStuck.load(std::memory_order_acquire)) {
+            continue;
+        }
+        // 2026-11-26 審：只在頭盔正在顯示（VISIBLE／FOCUSED）時判卡死。拿下頭盔、待機（Frame 的
+        // pauseCompositorOnStandby）、SYNCHRONIZED／IDLE 時 runtime 可以合法地讓 xrWaitFrame 等很久，
+        // 那時結束串流＝使用者拿下頭盔就斷線。門檻 5 秒（配戴實測最長的正常停頓遠小於 1 秒）
+        const int st = static_cast<int>(m_State.load());
+        if (st != XR_SESSION_STATE_VISIBLE && st != XR_SESSION_STATE_FOCUSED) {
+            continue;
+        }
+        const uint64_t since = m_XrPhaseSinceNs.load(std::memory_order_relaxed);
+        const uint64_t now = steadyNowNs();
+        if (since == 0 || now < since || now - since < 5000000000ull) {
+            continue;
+        }
+        if (m_XrApiStuck.exchange(true, std::memory_order_acq_rel)) {
+            continue;
+        }
+        m_XrStuckPhase.store(phase, std::memory_order_release);
+        m_Lost.store(true, std::memory_order_release);
+        m_StopRequested.store(true, std::memory_order_release);
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "[VIPLE-XR-WATCHDOG] %s has not returned for %llu ms - ending the stream (no process restart)",
+                    vipleXrApiName(phase), static_cast<unsigned long long>((now - since) / 1000000ull));
+        // onEnded 只推進 SDL 事件，不在這裡銷毀 runtime、也不重啟行程。shutdown 進行中或正在交還頭盔就不再叫。
+        if (!m_ShutdownStarted.load(std::memory_order_acquire) &&
+            !m_ExitRequested.load(std::memory_order_acquire) &&
+            !m_HandingBack.load(std::memory_order_acquire) && m_Options.onEnded) {
+            m_Options.onEnded(kEndedLoss);
+        }
+    }
+}
+
 void XrContext::frameThreadMain()
 {
 #ifdef __linux__
@@ -2262,6 +2684,11 @@ void XrContext::frameThreadMain()
 
     bool exitRequested = false;
     uint64_t lastViewLocateNs = 0;
+    // §VRDUAL-11A：這條執行緒所屬的世代。bringUp 重入會加一，舊的（已 detach）執行緒返回後只准離開。
+    const uint32_t epoch = m_FrameEpoch.load(std::memory_order_acquire);
+    const auto epochLive = [this, epoch]() {
+        return m_FrameEpoch.load(std::memory_order_acquire) == epoch;
+    };
 #ifdef HAVE_XR_VIDEO
     // §PERF-1113：畫面沒在顯示的偵測（見迴圈裡 xrWaitFrame 之後）。idleSinceNs＝第一個 shouldRender＝false 的時刻（0＝沒有）
     uint64_t idleSinceNs = 0;
@@ -2269,7 +2696,7 @@ void XrContext::frameThreadMain()
 #endif
     while (true) {
         m_LoopDiag.loopNo++;  // §VR-XRLOOP（量測）：第幾圈——[VIPLE-VR-XRLOOP] 的 tail 只算緊鄰的兩圈，見 pcvrLoopDiag
-        if (m_StopRequested.load()) {
+        if (m_StopRequested.load() || !epochLive()) {
             break;
         }
         if (!pollEvents()) {
@@ -2337,8 +2764,20 @@ void XrContext::frameThreadMain()
         XrFrameState fs = xrStruct<XrFrameState>(XR_TYPE_FRAME_STATE);
         XrFrameWaitInfo wi = xrStruct<XrFrameWaitInfo>(XR_TYPE_FRAME_WAIT_INFO);
         const uint64_t tw0 = steadyNowNs();
-        const XrResult wr = xrWaitFrame(m_Session, &wi, &fs);
+        XrResult wr;
+        {
+            XrPhaseScope phase(this, kXrPhaseWait);  // §VRDUAL-11A：不含前面的 sync／按鍵
+            if (!epochLive()) {
+                wr = XR_ERROR_SESSION_LOST;
+            }
+            else {
+                wr = xrWaitFrame(m_Session, &wi, &fs);
+            }
+        }
         m_DiagWaitNs = steadyNowNs() - tw0;
+        if (m_XrApiStuck.load(std::memory_order_acquire) || !epochLive()) {
+            break;  // §VRDUAL-11A：看門狗已結束串流，或這條執行緒已經被新的 bringUp 取代
+        }
 #ifdef HAVE_XR_VIDEO
         const uint64_t wakeNs = tw0 + m_DiagWaitNs;  // §VR-LDIAG：xrWaitFrame 返回的時刻
 #endif
@@ -2456,9 +2895,20 @@ void XrContext::frameThreadMain()
             const uint64_t tl0 = steadyNowNs();
             std::lock_guard<std::mutex> lk(m_QueueMutex);  // runtime 可能在 xrBeginFrame 用 queue
             const uint64_t tl1 = steadyNowNs();
-            br = xrBeginFrame(m_Session, &bfi);
+            {
+                XrPhaseScope phase(this, kXrPhaseBegin);  // §VRDUAL-11A：不含等 queue 鎖的時間
+                if (!epochLive()) {
+                    br = XR_ERROR_SESSION_LOST;
+                }
+                else {
+                    br = xrBeginFrame(m_Session, &bfi);
+                }
+            }
             m_DiagLockNs = tl1 - tl0;
             m_DiagBeginNs = steadyNowNs() - tl1;
+        }
+        if (m_XrApiStuck.load(std::memory_order_acquire) || !epochLive()) {
+            break;  // §VRDUAL-11A：看門狗已結束串流，或這條執行緒已經被新的 bringUp 取代
         }
         if (br == XR_FRAME_DISCARDED) {
             // 成功碼：前一格 begin 之後沒有 xrEndFrame 就又 begin，runtime 把前一格作廢。原本只檢查 XR_FAILED，
@@ -2975,7 +3425,8 @@ void XrContext::frameThreadMain()
             if (!img.isNull() && static_cast<uint32_t>(img.width()) == m_Options.shellWidth &&
                 static_cast<uint32_t>(img.height()) == m_Options.shellHeight) {
                 // §REVIEW-1111（第二輪）：介面的最後一次重畫上傳失敗時，畫面會停在舊的那一張直到下一次重畫；下一格再試
-                if (uploadImage(m_ShellSwapchain, m_ShellImages, m_ShellImageCount, img, imgBottomUp)) {
+                // §VRDUAL-5A：依這一張 swapchain image 的快照，只上傳有變的列
+                if (uploadImage(m_ShellSwapchain, m_ShellImages, m_ShellImageCount, img, imgBottomUp, true)) {
                     m_ShellUploaded = true;
                     m_ShellUploadRetries = 0;
                 }
@@ -3715,10 +4166,21 @@ void XrContext::frameThreadMain()
             }
 #endif
             te0 = steadyNowNs();
-            er = xrEndFrame(m_Session, &ei);
+            {
+                XrPhaseScope phase(this, kXrPhaseEnd);  // §VRDUAL-11A：不含 relatch 與等 queue 鎖
+                if (!epochLive()) {
+                    er = XR_ERROR_SESSION_LOST;
+                }
+                else {
+                    er = xrEndFrame(m_Session, &ei);
+                }
+            }
             te1 = steadyNowNs();
             m_DiagLockNs += tl1 - tl0;
             m_DiagEndNs = te1 - tl1;
+        }
+        if (m_XrApiStuck.load(std::memory_order_acquire) || !epochLive()) {
+            break;  // §VRDUAL-11A：這一格已經送出，或這條執行緒已經被新的 bringUp 取代
         }
 #ifdef HAVE_XR_VIDEO
         if (videoLayer && XR_SUCCEEDED(er) && m_Video != nullptr) {
@@ -3852,7 +4314,11 @@ void XrContext::frameThreadMain()
                 sessionStateName(s.highestState), sessionStateName(s.currentState), m_Lost.load() ? 1 : 0);
 
     // X5：不是 shutdown() 要求的結束 → 通知 Session（β：重建或退回平面）。交還給 VR 介面時 runtime 結束 session 是預期的
-    if (!m_ExitRequested.load() && !m_StopRequested.load() && !m_HandingBack.load()) {
+    // §VRDUAL-11A：看門狗已經呼叫 onEnded，並設了 m_StopRequested。這裡再看 m_XrApiStuck，避免晚返回的執行緒再叫一次。
+    // 世代不合＝bringUp 已經開了下一場，不能再通知舊的結束（那會把新的 session 關掉）。
+    const bool epochStale = !epochLive();
+    if (!epochStale && !m_ExitRequested.load() && !m_StopRequested.load() && !m_HandingBack.load() &&
+        !m_XrApiStuck.load(std::memory_order_acquire)) {
         int reason = 0;
         if (m_Lost.load()) {
             reason = kEndedLoss;
@@ -3870,7 +4336,8 @@ void XrContext::frameThreadMain()
     }
     // §REVIEW-1119：waitViews／waitRefreshHz 在 m_StatsMutex 裡等這面旗標。這裡若沒拿同一把鎖就改值、也不 notify，
     // 等的人可能已經看過舊值，接著要睡滿 timeout（呼叫端是 3 秒）才返回。
-    {
+    // §VRDUAL-11A：世代已換＝新的 frame thread 擁有這面旗標，舊執行緒不能把它清成 false。
+    if (!epochStale) {
         std::lock_guard<std::mutex> lk(m_StatsMutex);
         m_FrameThreadRunning.store(false, std::memory_order_release);
         m_ViewsCv.notify_all();
@@ -5917,6 +6384,8 @@ void XrContext::setHandBackOnShutdown(bool on)
 
 void XrContext::shutdown()
 {
+    // §VRDUAL-11A：先設，看門狗若在下面的等待期間才判定卡住，就不會再走一次 onEnded。不在這裡清 m_XrApiStuck。
+    m_ShutdownStarted.store(true, std::memory_order_release);
     if (m_FrameThread.joinable() && s_HandBackOnShutdown.load(std::memory_order_acquire) &&
         m_FrameThreadRunning.load(std::memory_order_acquire) && !m_Lost.load()) {
         // §VR-SHELL：先請 VR 介面開回它的 session；它一開，runtime 就把這邊的結束掉（frame thread 自己跑完 EXITING）
@@ -5949,7 +6418,38 @@ void XrContext::shutdown()
             SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] session did not reach STOPPING within 3 s; forcing frame thread stop");
         }
         m_StopRequested.store(true);
-        m_FrameThread.join();
+        // §VRDUAL-11A：先停看門狗（它最多再睡 200 ms），再決定 join 或 detach。detach 後不 xrDestroy*。
+        m_WatchdogStop.store(true, std::memory_order_release);
+        if (m_WatchdogThread.joinable()) {
+            m_WatchdogThread.join();
+        }
+        if (m_FrameThreadRunning.load(std::memory_order_acquire)) {
+            const auto extra = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+            while (m_FrameThreadRunning.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < extra) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+        if (m_FrameThreadRunning.load(std::memory_order_acquire) &&
+            (m_XrApiStuck.load(std::memory_order_acquire) || m_XrPhase.load(std::memory_order_acquire) != 0)) {
+            int phase = m_XrPhase.load(std::memory_order_acquire);
+            if (phase == 0) {
+                phase = m_XrStuckPhase.load(std::memory_order_acquire);
+            }
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-XR-WATCHDOG] frame thread still inside %s - detaching it so shutdown can finish",
+                        vipleXrApiName(phase));
+            m_XrApiStuck.store(true, std::memory_order_release);
+            m_FrameThread.detach();
+        }
+        else {
+            m_FrameThread.join();
+        }
+    }
+    else {
+        m_WatchdogStop.store(true, std::memory_order_release);
+        if (m_WatchdogThread.joinable()) {
+            m_WatchdogThread.join();
+        }
     }
     m_AsyncLog.stop();  // §VR-LOGASYNC：印完 frame thread 留下的 10 s 行
     destroyAll();
@@ -5997,6 +6497,16 @@ void XrContext::destroyAll()
     for (QImage& img : m_KbCache) {
         img = QImage();
     }
+    // §VRDUAL-11A：frame thread 還在 xrWaitFrame／xrBeginFrame／xrEndFrame 裡面（xrBeginFrame／xrEndFrame 可能握著
+    // m_QueueMutex）。不鎖 queue、不 vkDestroy*、不 xrDestroy*、不刪 m_Video／m_Input／m_VrCtl，也不印 destroyed。
+    if (m_XrApiStuck.load(std::memory_order_acquire)) {
+        if (!m_XrLeakLogged) {
+            m_XrLeakLogged = true;
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[VIPLE-XR-WATCHDOG] leaking the OpenXR instance and Vulkan device; the frame thread is still inside the runtime");
+        }
+        return;
+    }
     // M4a 收尾：原本 vkDeviceWaitIdle 沒有上限——runtime 在串流中死掉、GPU 工作等不到結果時會永遠卡住。
     // 改成送一個空 batch 帶 fence、最多等 2 s；等不到就標 wedged，下面跳過所有無限期等待並洩漏資源。
     if (m_VkDevice != VK_NULL_HANDLE && m_Queue != VK_NULL_HANDLE && !gpuWedged() &&
@@ -6014,8 +6524,10 @@ void XrContext::destroyAll()
             if (wr == VK_SUCCESS) {
                 s_Vk.DestroyFence(m_VkDevice, idle, nullptr);
                 // §REVIEW-1111（第二輪）：佇列已經閒下來，先前逾時沒等到的那一批也做完了；
-                // 不清掉的話下面會因為 m_CmdPending 跳過 staging buffer 的釋放、接著裝置就被銷毀
-                m_CmdPending = false;
+                // 不清掉的話下面會因為 pending 跳過 staging buffer 的釋放、接著裝置就被銷毀
+                for (UploadSlot& u : m_Upload) {
+                    u.pending = false;  // §VRDUAL-2B
+                }
             }
             else {
                 markGpuWedged(wr == VK_TIMEOUT ? "queue did not go idle within 2 s at teardown" : "queue idle wait failed at teardown");
@@ -6086,6 +6598,16 @@ void XrContext::destroyAll()
     m_ShellImageCount = 0;
     m_ShellUploaded = false;
     m_ShellLogged = false;
+    // §VRDUAL-5A：swapchain 換過之後快照不能沿用。正常銷毀時這裡清掉；卡住提早返回的那條路碰不到。
+    m_ShellSnapSc = XR_NULL_HANDLE;
+    m_ShellSnapW = 0;
+    m_ShellSnapH = 0;
+    for (auto& snap : m_ShellSnap) {
+        snap.clear();
+    }
+    m_ShellUpNs = 0;
+    m_ShellUpN = m_ShellUpFull = m_ShellUpPart = m_ShellUpSkip = 0;
+    m_ShellUpRows = 0;
     for (auto* s : {&m_KbSwapchain, &m_KbHoverSwapchain, &m_KbPressSwapchain}) {
         if (*s != XR_NULL_HANDLE) {
             xrDestroySwapchain(*s);
@@ -6098,16 +6620,23 @@ void XrContext::destroyAll()
     }
     m_KbImageCount = m_KbHoverImageCount = m_KbPressImageCount = 0;
     m_KbUploaded = m_KbHoverReady = m_KbPressReady = false;
-    // §REVIEW-1104：GPU 已卡住或上傳命令還沒完成時，staging 可能仍被 command buffer 讀，比照 device 留下不釋放
-    if (m_Staging != VK_NULL_HANDLE && m_VkDevice != VK_NULL_HANDLE && !gpuWedged() && !m_CmdPending) {
-        s_Vk.UnmapMemory(m_VkDevice, m_StagingMem);
-        s_Vk.DestroyBuffer(m_VkDevice, m_Staging, nullptr);
-        s_Vk.FreeMemory(m_VkDevice, m_StagingMem, nullptr);
+    // §REVIEW-1104／§VRDUAL-2B：GPU 已卡住或這一槽還沒完成時，staging 可能仍被 command buffer 讀，留下不釋放。
+    // handle 仍清成空，下次 bringUp 不會拿已洩漏的記憶體來上傳。
+    if (m_VkDevice != VK_NULL_HANDLE && !gpuWedged()) {
+        for (UploadSlot& u : m_Upload) {
+            if (u.staging != VK_NULL_HANDLE && !u.pending) {
+                s_Vk.UnmapMemory(m_VkDevice, u.stagingMem);
+                s_Vk.DestroyBuffer(m_VkDevice, u.staging, nullptr);
+                s_Vk.FreeMemory(m_VkDevice, u.stagingMem, nullptr);
+            }
+        }
     }
-    m_Staging = VK_NULL_HANDLE;
-    m_StagingMem = VK_NULL_HANDLE;
-    m_StagingPtr = nullptr;
-    m_StagingSize = 0;
+    for (UploadSlot& u : m_Upload) {
+        u.staging = VK_NULL_HANDLE;
+        u.stagingMem = VK_NULL_HANDLE;
+        u.stagingPtr = nullptr;
+        u.stagingSize = 0;
+    }
     if (m_PointerSwapchain != XR_NULL_HANDLE) {
         xrDestroySwapchain(m_PointerSwapchain);
         m_PointerSwapchain = XR_NULL_HANDLE;
@@ -6169,13 +6698,24 @@ void XrContext::destroyAll()
                     "[VIPLE-XR] GPU wedged - leaking the Vulkan device instead of waiting for it");
     }
     else if (m_VkDevice != VK_NULL_HANDLE) {
-        if (m_Fence != VK_NULL_HANDLE && s_Vk.DestroyFence) s_Vk.DestroyFence(m_VkDevice, m_Fence, nullptr);
+        if (s_Vk.DestroyFence) {
+            for (UploadSlot& u : m_Upload) {  // §VRDUAL-2B
+                if (u.fence != VK_NULL_HANDLE) {
+                    s_Vk.DestroyFence(m_VkDevice, u.fence, nullptr);
+                }
+            }
+        }
         if (m_CmdPool != VK_NULL_HANDLE && s_Vk.DestroyCommandPool) s_Vk.DestroyCommandPool(m_VkDevice, m_CmdPool, nullptr);
         if (s_Vk.DestroyDevice) s_Vk.DestroyDevice(m_VkDevice, nullptr);
     }
-    m_Fence = VK_NULL_HANDLE;
+    for (UploadSlot& u : m_Upload) {
+        u.fence = VK_NULL_HANDLE;
+        u.cmd = VK_NULL_HANDLE;
+        u.pending = false;
+    }
+    m_UploadCursor = 0;
+    m_ActiveUpload = -1;
     m_CmdPool = VK_NULL_HANDLE;
-    m_Cmd = VK_NULL_HANDLE;
     m_VkDevice = VK_NULL_HANDLE;
     m_Queue = VK_NULL_HANDLE;
     // §REVIEW-1111（第二輪）：GPU 卡住時上面刻意不銷毀 device；device 還在就不能銷毀它的 instance
@@ -6187,7 +6727,6 @@ void XrContext::destroyAll()
     m_VkPhysicalDevice = VK_NULL_HANDLE;
     // 上一筆上傳的等待狀態跟著 device 一起作廢；留著的話重新 bringUp 之後會去等一個從沒送出過的 fence，
     // 所有貼圖上傳（載入畫面、鍵盤、提示）都被跳過。
-    m_CmdPending = false;
     m_CmdTimeoutLogged = false;
     if (m_Instance != XR_NULL_HANDLE) {
         xrDestroyInstance(m_Instance);

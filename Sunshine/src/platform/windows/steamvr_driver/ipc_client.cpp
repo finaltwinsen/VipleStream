@@ -11,6 +11,7 @@
 
 #include "driver_log.h"
 #include "ipc_proto.h"
+#include "viple_build_id.h"  // §VRDUAL-7A
 
 namespace vrdrv {
   namespace {
@@ -954,6 +955,7 @@ namespace vrdrv {
       hello.reserved_mb = 0;
       hello.driver_caps = cfg_.driver_caps | (cfg_.peer_mode ? VRIPC_DCAP_PEER : 0u);
       hello.openvr_sdk_packed = cfg_.openvr_sdk_packed;
+      hello.reserved[0] = viple_build_id::k_packed;  // §VRDUAL-7A：短 HELLO（peer hook 縮小 size）送不出去這欄，server 看成沒填
       const size_t n = cfg_.iface_directmode.size() < VRIPC_IFACE_CHARS - 1 ? cfg_.iface_directmode.size() : VRIPC_IFACE_CHARS - 1;
       std::memcpy(hello.iface_directmode, cfg_.iface_directmode.data(), n);
       std::memcpy(buf, &hello, size < sizeof(hello) ? size : sizeof(hello));
@@ -1205,6 +1207,18 @@ namespace vrdrv {
                          (unsigned long long) wl.generation, wl.server_version_packed >> 24, (wl.server_version_packed >> 16) & 0xFFu,
                          wl.server_version_packed & 0xFFFFu, wl.abi_version, g->idle() ? 1 : 0, c.packed_width, c.packed_height,
                          c.refresh_mhz / 1000, c.refresh_mhz % 1000, wl.welcome_flags, hdr.armed);
+          // §VRDUAL-7A：不中止握手。sunshine.log 轉印時 '[' 會變成 '('，vrserver.txt 仍是方括號。
+          {
+            static const char *const keep_bid = viple_build_id::embedded_tag();
+            (void) keep_bid;
+            if (!viple_build_id::same(viple_build_id::k_packed, wl.reserved[0])) {
+              char server_id[40];
+              char driver_id[40];
+              viple_build_id::format(wl.reserved[0], server_id, sizeof server_id);
+              viple_build_id::format(viple_build_id::k_packed, driver_id, sizeof driver_id);
+              VRDRV_LOG_WARN("[VIPLE-VR-BUILDID] mismatch server=%s driver=%s - restart SteamVR or restage the driver", server_id, driver_id);
+            }
+          }
           attempt_hook("welcome", 0);
           signal_first(first_e::mapped);
           if (cb_.on_mapped) {

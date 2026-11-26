@@ -234,7 +234,7 @@ typedef struct vripc_hello_t { /* driver → server，連線後第一則；前 2
   uint32_t driver_caps; /* VRIPC_DCAP_* */
   uint32_t openvr_sdk_packed; /* (major<<24)|(minor<<16)|build，2.15.6 */
   char iface_directmode[VRIPC_IFACE_CHARS]; /* "IVRDriverDirectModeComponent_009"，NUL 結尾 */
-  uint64_t reserved[2];
+  uint64_t reserved[2]; /* [0]＝§VRDUAL-7A build id（0＝舊版沒填）。版面與欄位名不變，不一致只記 log */
 } vripc_hello_t;
 
 typedef struct vripc_welcome_t { /* server → driver */
@@ -251,7 +251,7 @@ typedef struct vripc_welcome_t { /* server → driver */
   uint64_t dup_evt_frm; /* EVENT_MODIFY_STATE */
   uint32_t server_version_packed;
   uint32_t welcome_flags; /* VRIPC_WF_* */
-  uint64_t reserved[2];
+  uint64_t reserved[2]; /* [0]＝§VRDUAL-7A build id（0＝舊版沒填）。版面與欄位名不變，不一致只記 log */
 } vripc_welcome_t;
 
 typedef struct vripc_reject_t { /* 凍結 */

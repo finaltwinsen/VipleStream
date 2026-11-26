@@ -273,6 +273,8 @@ set(SUNSHINE_TARGET_FILES
         # 時鐘對映（純模組）、selftest 協調（平台無關；Linux 也編譯，平台部分走 vr_stub.cpp）
         "${CMAKE_SOURCE_DIR}/src/vr/vr_ipc_abi.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_ipc_abi_table.h"
+        # §VRDUAL-7A：編譯期 build id（產生檔在建置目錄，不進來源樹）
+        "${CMAKE_SOURCE_DIR}/src/vr/viple_build_id.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_bridge.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_clock.h"
         "${CMAKE_SOURCE_DIR}/src/vr/vr_clock.cpp"
@@ -319,6 +321,9 @@ list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_PUBLISHER_WEBSITE="${SUNSHINE_PUBLISHE
 list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_PUBLISHER_ISSUE_URL="${SUNSHINE_PUBLISHER_ISSUE_URL}")
 
 include_directories(BEFORE "${CMAKE_SOURCE_DIR}")
+
+# §VRDUAL-7A：viple_build_id.h 用 __has_include("viple_build_id_gen.h") 找到這份產生檔
+include_directories(BEFORE "${CMAKE_BINARY_DIR}/generated")
 
 # VipleStream §SELF-UPDATE（2026-11-20 審查 F7）：self_update.cpp 的內嵌備援腳本 kLinuxScript 與 .deb 安裝的
 # helper 共用同一份來源 src_assets/linux/misc/self-update-helper.sh。建置時把它包成 C++ raw string 標頭，

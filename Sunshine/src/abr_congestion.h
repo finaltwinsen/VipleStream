@@ -58,6 +58,11 @@ namespace abr_cong {
   /// 緊急降碼（×0.50）兩刀之間的最短間隔
   constexpr std::chrono::milliseconds k_emergency_cooldown {3000};
   constexpr int k_cut_trend_pct = 85;
+  /// §ABR-TREND-FLOOR（2026-11-26）：趨勢過載要真的降碼，RTT 還得已經高出基線至少這麼多（或平常抖動，取大者）；
+  /// 不到就只暫停回升（L1）。11-25 使用者 log：區網 base 1 ms、RTT 1→6 ms（抖動 5 ms）時趨勢判過載，2D 場連砍兩刀
+  /// （8308→7062 kbps）。6 ms＝延遲趨勢門檻 γ 的地板（abr_delay_trend.h），趨勢預估 2 秒後膨脹超過它、實際膨脹量也已經
+  /// 到它才算佇列真的在長
+  constexpr double k_trend_cut_min_excess_ms = 6.0;
   constexpr int k_cut_severe_pct = 70;
   constexpr int k_cut_emergency_pct = 50;
   /// 塞車點：記下後 5 秒內的後續刀不覆寫；30 秒沒有再到 L2 以上就清掉；快回升只能到它的 9 成
@@ -415,12 +420,15 @@ namespace abr_cong {
         exit_rounds_ = 0;
       }
 
+      // §ABR-TREND-FLOOR：趨勢過載但實際膨脹量還很小 → 只算 L1（暫停回升），不降碼
+      const double trend_excess = static_cast<double>(in.rtt_ms) - static_cast<double>(in.base_ms);
+      const bool trend_cut = in.trend_over && trend_excess >= std::max(k_trend_cut_min_excess_ms, in.jitter_ms);
       level_e raw = level_e::clean;
       if (deep_latched_) {
         raw = level_e::deep;
-      } else if (in.trend_over || in.severe) {
+      } else if (trend_cut || in.severe) {
         raw = level_e::cut;
-      } else if (in.hold) {
+      } else if (in.hold || in.trend_over) {
         raw = level_e::hold;
       }
 
@@ -463,7 +471,7 @@ namespace abr_cong {
       } else if (cooled(have_cut_, last_cut_, now, k_cut_cooldown)) {
         if (in.severe && !drain_block) {
           out.action = action_e::cut_severe;
-        } else if (in.trend_over) {
+        } else if (trend_cut) {
           out.action = action_e::cut_trend;
         }
       }

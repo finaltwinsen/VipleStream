@@ -1071,3 +1071,26 @@ TEST_F(AbrCongestionTest, ExpireCongestionPointOnDeepDoesNotDemote) {
   EXPECT_EQ(c.level(), ac::level_e::deep);
   EXPECT_EQ(c.idr_gap_hint(), gap);
 }
+
+// §ABR-TREND-FLOOR：區網 base 1 ms、RTT 6 ms（抖動 5 ms）時趨勢判過載 → 只暫停回升（L1），不降碼（11-25 使用者 log）
+TEST_F(AbrCongestionTest, TrendOverOnTinyInflationOnlyHolds) {
+  for (int i = 0; i < 10; ++i) {
+    const auto o = c.update(in(6, 1, 5.0, false, true), t0 + i * 500ms);
+    EXPECT_EQ(o.level, ac::level_e::hold);
+    EXPECT_EQ(o.action, ac::action_e::none);
+  }
+}
+
+// §ABR-TREND-FLOOR：膨脹量到 6 ms（或抖動，取大者）才降碼
+TEST_F(AbrCongestionTest, TrendOverCutsOnceInflationReachesFloor) {
+  auto o = c.update(in(7, 1, 2.0, false, true), t0);  // 膨脹 6 ms ≥ max(6, 2)
+  EXPECT_EQ(o.level, ac::level_e::cut);
+  EXPECT_EQ(o.action, ac::action_e::cut_trend);
+
+  ac::congestion_t c2;
+  o = c2.update(in(16, 2, 20.0, false, true), t0);  // 膨脹 14 ms，但平常抖動 20 ms：只暫停
+  EXPECT_EQ(o.level, ac::level_e::hold);
+  EXPECT_EQ(o.action, ac::action_e::none);
+  o = c2.update(in(25, 2, 20.0, false, true), t0 + 500ms);  // 膨脹 23 ms ≥ 20
+  EXPECT_EQ(o.action, ac::action_e::cut_trend);
+}

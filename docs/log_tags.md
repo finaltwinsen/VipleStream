@@ -918,6 +918,7 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
 [VIPLE-VR-IPC] user-ace set sid=*<RID>                                    ← 只印 RID，不印完整 SID
 [VIPLE-VR-IPC] user-ace reapplied | user-ace reapply failed               ← 核對時發現 pipe 少了使用者 ACE
 [VIPLE-VR-IPC] handshake gen=<G> driver=<ver> abi=<N> vrserver-pid=<pid> iface=IVRDriverDirectModeComponent_009 ring=<W>x<H> luid=set identity=<身分> caps=0x…
+[VIPLE-VR-BUILDID] mismatch server=<id> driver=<id|unreported> - restart SteamVR or restage the driver
 [VIPLE-VR-IPC] rejected reason=<原因> …                                    ← 映像路徑經 loggable_path 過濾（空白、`=`、`[` 會變成 `?`）
 [VIPLE-VR-IPC] host image set before handshake image=<路徑>                ← §VR-IPC-1126：開 pipe 或驗證前補上還沒填的宿主路徑
 [VIPLE-VR-IPC] driver-heartbeat grace gen=<G> hbAgeMs=<ms> waitedMs=<ms> capMs=15000
@@ -948,6 +949,10 @@ server 的 STATS 計數欄位是累計值，這一行印的是兩筆之間的差
   - `rejected reason=image … expected=<none>` 且行尾 `host-image-unset=1 logged-once-per-gen=1 backoff=0`：
     補完仍是空的。這不是異常，降為 info、每個 generation 只印一次、不累加 streak、不退避。
     expected 有值但路徑不同仍是 Warning，streak 與退避（1、2、4、8、10 秒）照舊。
+- **§VRDUAL-7A**：握手成功之後才比 build id（hello／welcome 的 `reserved[0]`，0＝對方沒填）。不一致只印上面那一行 Warning，不拆連線、不改 ABI。
+  `<id>` 是 12 碼 hex、`hex-dirty`（工作區有已追蹤的修改）、或 `unknown`（兩邊都讀不到 git，視為相同）。`unreported`＝對方留下 0（舊版）。
+  server 這行在 sunshine.log 保持 `[VIPLE-VR-BUILDID]`。driver 同一句經 `[VIPLE-VR-DRV]` 轉進 sunshine.log 時，內文的 `[` 改成 `(`，
+  所以是 `[VIPLE-VR-DRV] (VIPLE-VR-BUILDID] mismatch …`。vrserver.txt 仍是帶括號的原文。grep `VIPLE-VR-BUILDID` 兩種檔都找得到。
 
 ## 5c. Steam Frame 探測與執行環境（2.0 §SF，M2a 起）
 
@@ -1002,6 +1007,9 @@ driver viplestream implements interfaces … IVRDriverDirectModeComponent_009 �
                                                                                        不拿掉行首的 `[`：行中間仍可再寫一個 `[VIPLE-VR-IPC]`）。
                                                                                        sunshine.log 是 `[VIPLE-VR-DRV] (VIPLE-VR-STALE] …`。grep `VIPLE-VR-STALE` 兩種檔案都找得到；
                                                                                        這一行拼不出以 `[` 開頭的伺服器 tag。rejected 的映像路徑仍走 loggable_path，`[`、空白、`=` 還是 `?`。
+[VIPLE-VR-DRV] [VIPLE-VR-MONO] layer 0 missing one eye SRV, copied the other eye (count=N)  ← §VRDUAL-1A：layer 0 只有一眼有 SRV，缺的那眼改畫另一眼（第一次與每 300 次）。
+                                                                                       vrserver.txt 是這一行。sunshine.log 把內文 `[` 改成 `(`：`[VIPLE-VR-DRV] (VIPLE-VR-MONO] layer 0 missing one eye SRV, copied the other eye (count=N)`。
+                                                                                       grep `VIPLE-VR-MONO` 兩種檔都找得到。
 [VIPLE-VR-DRV] tracking recovered gap_ms=… total_ms=… hold=<0|1>                  ← stale 之後收到新樣本；gap_ms＝距上次 stale 重送、total_ms＝整段空窗（2026-10-05 起）
 [VIPLE-VR-EDGE] a button or trigger change arrived N ms later than usual: the game gets the hands as they were at that moment for H ms
                 (so far this session: N times, N samples skipped)                    ← server（§VR-EDGE-HOLD，2026-11-14，`vr_edge_hold_ms`，每秒最多一行）：
@@ -1627,7 +1635,20 @@ PCVR 的 frame thread 挑影像之前，如果有一張串流影像已經送進 
 [VIPLE-XR] refresh mismatch: runtime reports <Hz> (requested <Hz>) but predictedDisplayPeriod=<ms> (<Hz>) - using the measured period
 [VIPLE-XR] predictedDisplayPeriod did not settle within <ms> ms (last <ms>) - using it anyway
 [VIPLE-XR] destroyed
+[VIPLE-XR-WATCHDOG] xrWaitFrame|xrBeginFrame|xrEndFrame has not returned for <ms> ms - ending the stream (no process restart)
+[VIPLE-XR-WATCHDOG] frame thread still inside xrWaitFrame|xrBeginFrame|xrEndFrame - detaching it so shutdown can finish
+[VIPLE-XR-WATCHDOG] leaking the OpenXR instance and Vulkan device; the frame thread is still inside the runtime
+[VIPLE-XR-SHELLUP] uploads=<N> full=<N> partial=<N> skipped=<N> rows=<N>
 ```
+
+- **§VRDUAL-11A**：`xrWaitFrame`／`xrBeginFrame`／`xrEndFrame` 超過 3 秒沒返回，看門狗印第一行並走既有的結束串流（`onEnded` → PCVR 顯示錯誤並 `SDL_QUIT`，非 PCVR 最多重建 3 次）。不 `execv`、不在看門狗裡 `xrDestroyInstance`。
+  卡住的執行緒若關不掉，shutdown 印第二行並 detach，第三行表示 OpenXR instance 與 Vulkan device 刻意留下（那條執行緒還在 runtime 裡）。
+  行首時間是程式啟動後經過的時間，不是牆鐘（見本文件開頭）。頭盔休眠讓這三個呼叫堵住超過 3 秒時，也會結束這場串流。
+- **§VRDUAL-5A**：只有 VR Shell 的上傳會印 `[VIPLE-XR-SHELLUP]`，約 10 秒一次。`uploads`＝`full`＋`partial`＋`skipped`；`rows` 是實際複製的列數（整張算全部列，沒變是 0）。
+  沒變的畫面不佔上傳槽。部分列假設 acquire 之後的 layout 是 `COLOR_ATTACHMENT_OPTIMAL`；第一次寫入仍整張、`UNDEFINED`。swapchain 超過 4 張就每次整張複製、不記快照。
+- **§VRDUAL-2B**：貼圖上傳有兩組 command buffer／fence／staging。兩組都還在 GPU 上時，沿用原本那一行（只印一次，完成後再印 resume）：
+  `[VIPLE-XR] upload command buffer still pending after <ms> ms (vk=<n>) - not reusing it, uploads skipped until it completes`，
+  接著 `[VIPLE-XR] upload command buffer completed, uploads resume`。
 
 - M4a 收尾（CLI `stream`，main.cpp）：session 建立後的錯誤印 `Stream error: <訊息>`／`Stream error: starting <stage> failed (error <n>)…` 到 stderr，CLI 以 rc 1 結束（不開對話框）；建立前的錯誤仍是 `Stream failed: …`。
 

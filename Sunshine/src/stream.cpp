@@ -4532,7 +4532,10 @@ namespace stream {
     // 上限的九成多。VR 降碼不送 IDR（video.cpp），多幾次 reconfigure 沒有代價。桌面 session 不變。
     const bool vrCapMoved = session->vr && target != applied && (target >= maxBr || applied > maxBr);
     const bool fastTriggered = session->vr && session->video.vrAbrFast && fastBitrateChanged && target != applied;
-    if (std::abs(target - applied) > applied / 10 || vrCapMoved || fastTriggered) {
+    // §ABR-DESK-TOPOFF（2026-11-26）：桌面回升的最後一階常不到 10%（11-25 使用者 log：7892→8308 只差 416），
+    // target 已頂到上限卻永遠套不上去，整場停在上限的 95%。頂到上限時直接套用；回升不送 IDR（video.cpp），沒有代價
+    const bool deskTopOff = !session->vr && target > applied && target >= maxBr;
+    if (std::abs(target - applied) > applied / 10 || vrCapMoved || fastTriggered || deskTopOff) {
       session->video.adaptiveBitrateKbps.store(target);
 
       auto bitrateEvents = session->mail->event<int>(mail::bitrate_change);

@@ -53,6 +53,7 @@
 #include "src/vr/vr_bridge.h"
 #include "src/vr/vr_direct_kick.h"
 #include "src/vr/vr_platform.h"
+#include "src/vr/viple_build_id.h"  // §VRDUAL-7A
 #include "src/vr/vr_edge_hold.h"
 #include "src/vr/vr_echo_handoff.h"
 
@@ -674,6 +675,7 @@ namespace vr::bridge {
       FILETIME created {};
       bool selftest_peer = false;
       uint32_t driver_version_packed = 0;
+      uint64_t driver_build_id = 0;  ///< §VRDUAL-7A：hello.reserved[0]；0＝對方沒填。不進 ABI 狀態結構
       uint32_t driver_caps = 0;
       std::string iface;
       uint32_t out_seq = 0;
@@ -2042,6 +2044,7 @@ namespace vr::bridge {
         return r;
       }
       c.driver_version_packed = hello.driver_version_packed;
+      c.driver_build_id = hello.reserved[0];  // §VRDUAL-7A：不參與拒絕條件
       c.driver_caps = hello.driver_caps;
       c.iface = sanitize(hello.iface_directmode, VRIPC_IFACE_CHARS);
       r.ok = true;
@@ -2356,6 +2359,7 @@ namespace vr::bridge {
       w.dup_evt_frm = r_frm;
       w.server_version_packed = server_version_packed();
       w.welcome_flags = dev ? VRIPC_WF_DEV_PACING : 0u;
+      w.reserved[0] = viple_build_id::k_packed;  // §VRDUAL-7A：reserved[1] 維持 0
       if (!write_msg(&w, sizeof w)) {
         reclaim();
         BOOST_LOG(warning) << "[VIPLE-VR-IPC] handshake failed stage=welcome-write err=" << last_io_error_;
@@ -2435,6 +2439,20 @@ namespace vr::bridge {
         tracking_wanted_.store(true, std::memory_order_release);
       }
       BOOST_LOG(info) << log_line;
+      // §VRDUAL-7A：版號相同、commit 不同時只警告，不拆連線、不改握手結果。
+      {
+        static const char *const keep_bid = viple_build_id::embedded_tag();
+        (void) keep_bid;
+        const uint64_t driver_bid = conn_->driver_build_id;
+        if (!viple_build_id::same(viple_build_id::k_packed, driver_bid)) {
+          char server_id[40];
+          char driver_id[40];
+          viple_build_id::format(viple_build_id::k_packed, server_id, sizeof server_id);
+          viple_build_id::format(driver_bid, driver_id, sizeof driver_id);
+          BOOST_LOG(warning) << "[VIPLE-VR-BUILDID] mismatch server=" << server_id << " driver=" << driver_id
+                             << " - restart SteamVR or restage the driver";
+        }
+      }
       // §PERF-1113：2 ms 的 timer 只掛給有 config 的 generation（VR session）。閒置 generation（vrserver 開著、
       // server 沒有要它出畫面）的 ring 是空的，只剩 100 ms 的 heartbeat 要做，原本照樣每秒醒 500 次。
       // config 一變就換 generation、重新握手，所以只有這裡要決定；有沒有 arm（set_armed）不影響這個判斷。
