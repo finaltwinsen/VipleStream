@@ -2315,6 +2315,10 @@ namespace platf {
     HANDLE timer = nullptr;
   };
 
+  void short_sleep(std::chrono::milliseconds duration) {
+    ::Sleep(static_cast<DWORD>(std::max<int64_t>(0, duration.count())));
+  }
+
   std::unique_ptr<high_precision_timer> create_high_precision_timer() {
     return std::make_unique<win32_high_precision_timer>();
   }

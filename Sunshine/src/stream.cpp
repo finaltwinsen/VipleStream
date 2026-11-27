@@ -333,7 +333,8 @@ namespace stream {
 
   static inline void while_starting_do_nothing(std::atomic<session::state_e> &state) {
     while (state.load(std::memory_order_acquire) == session::state_e::STARTING) {
-      std::this_thread::sleep_for(1ms);
+      // §ENC-PACE：MinGW 的 sleep_for(1ms) 實際 15.6 ms，開場第一幀會多等最多一格；改用 platf::short_sleep
+      platf::short_sleep(1ms);
     }
   }
 

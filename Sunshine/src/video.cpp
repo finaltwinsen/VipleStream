@@ -1728,7 +1728,9 @@ namespace video {
           return true;
         } else {
           // sleep and retry if image pool is full
-          std::this_thread::sleep_for(1ms);
+          // §ENC-PACE：MinGW 的 sleep_for(1ms) 實際睡 15.6 ms（host 實測），編碼器稍微落後時擷取會漏好幾幀；
+          // Windows 走原生 Sleep（platf::short_sleep；串流期間 1.1 ms）
+          platf::short_sleep(1ms);
         }
       }
       return false;

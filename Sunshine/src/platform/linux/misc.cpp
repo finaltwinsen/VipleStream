@@ -1288,6 +1288,10 @@ namespace platf {
     }
   };
 
+  void short_sleep(std::chrono::milliseconds duration) {
+    std::this_thread::sleep_for(duration);
+  }
+
   std::unique_ptr<high_precision_timer> create_high_precision_timer() {
     return std::make_unique<linux_high_precision_timer>();
   }

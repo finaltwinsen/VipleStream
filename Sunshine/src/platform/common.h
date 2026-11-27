@@ -1160,6 +1160,14 @@ namespace platf {
   std::unique_ptr<high_precision_timer> create_high_precision_timer();
 
   /**
+   * @brief §ENC-PACE（2026-11-27）：短暫睡眠（輪詢的重試間隔用）。
+   * @details MinGW 的 std::this_thread::sleep_for 不論多短都至少睡一個 15.6 ms 的系統刻度（host 實測
+   *          sleep_for(1ms) 是 15.5 ms，系統計時器調到 0.5 ms 也一樣）；Windows 改用原生 Sleep（串流期間 1.1 ms）。
+   *          其他平台就是 sleep_for。
+   */
+  void short_sleep(std::chrono::milliseconds duration);
+
+  /**
    * @brief VipleStream 2.0 §VR（M1b S1-01／S1-12）：VR 路徑共用的單調時鐘，目前的 tick 值。
    * @details 平台中立的宣告，讓 stream.cpp 的 tracking handler、vr_selftest 等共用程式碼在
    *          Linux／macOS 也能編譯（vr_session／vr_clock 是純模組，不直接呼叫它，tick 由

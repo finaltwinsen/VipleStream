@@ -28,6 +28,13 @@ namespace thread_pool_util {
 
     std::atomic<bool> _continue;
 
+    // §ENC-PACE（2026-11-27）：延遲工作的準時叫醒。MinGW 的 condition_variable::wait_until 至少等一個
+    // 15.6 ms 的系統刻度（host 實測：等 10 ms 實際 11.6～24 ms，計時器調到 0.5 ms 也一樣），
+    // 滑鼠左鍵放開延遲 10 ms 變 16 ms、按鍵連發 25 Hz 掉到約 21 Hz。這條執行緒用平台的高精度計時器睡到
+    // 最早的到期時刻（每次最多 2 ms，好接住中途插進來、更早到期的工作）再 notify；沒有延遲工作時只等 _waker_cv。
+    std::thread _waker;
+    std::condition_variable _waker_cv;
+
   public:
     ThreadPool():
         _continue {false} {
@@ -39,6 +46,7 @@ namespace thread_pool_util {
       for (auto &t : _thread) {
         t = std::thread(&ThreadPool::_main, this);
       }
+      _waker = std::thread(&ThreadPool::_waker_main, this);
     }
 
     ~ThreadPool() noexcept {
@@ -65,6 +73,7 @@ namespace thread_pool_util {
       TaskPool::pushDelayed(std::move(task));
 
       _cv.notify_all();
+      _waker_cv.notify_all();
     }
 
     template<class Function, class X, class Y, class... Args>
@@ -74,6 +83,7 @@ namespace thread_pool_util {
 
       // Update all timers for wait_until
       _cv.notify_all();
+      _waker_cv.notify_all();
       return future;
     }
 
@@ -85,6 +95,9 @@ namespace thread_pool_util {
       for (auto &t : _thread) {
         t = std::thread(&ThreadPool::_main, this);
       }
+      if (!_waker.joinable()) {
+        _waker = std::thread(&ThreadPool::_waker_main, this);
+      }
     }
 
     void stop() {
@@ -92,6 +105,7 @@ namespace thread_pool_util {
 
       _continue = false;
       _cv.notify_all();
+      _waker_cv.notify_all();
     }
 
     void join() {
@@ -100,9 +114,41 @@ namespace thread_pool_util {
           t.join();
         }
       }
+      if (_waker.joinable()) {
+        _waker.join();
+      }
     }
 
   public:
+    void _waker_main() {
+      platf::set_thread_name("TaskPool::waker");
+      auto timer = platf::create_high_precision_timer();
+      if (!timer || !*timer) {
+        return;  // 沒有高精度計時器：工作執行緒的 wait_until 照舊（約 16 ms 一格）
+      }
+      std::unique_lock lk(_lock);
+      while (_continue.load(std::memory_order_relaxed)) {
+        const auto tp = next();
+        if (!tp) {
+          _waker_cv.wait(lk);
+          continue;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (*tp <= now) {
+          // 到期了：叫醒工作執行緒；它若正忙，0.5 ms 後再叫一次（只在有到期工作時才會這樣輪）
+          _cv.notify_one();
+          lk.unlock();
+          timer->sleep_for(std::chrono::microseconds(500));
+          lk.lock();
+          continue;
+        }
+        const auto wait = std::min<std::chrono::steady_clock::duration>(*tp - now, std::chrono::milliseconds(2));
+        lk.unlock();
+        timer->sleep_for(wait);
+        lk.lock();
+      }
+    }
+
     void _main() {
       platf::set_thread_name("TaskPool::worker");
       while (_continue.load(std::memory_order_relaxed)) {
