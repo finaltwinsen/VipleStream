@@ -257,6 +257,8 @@ CenteredGridView {
                 Text {
                     visible: heroBanner.featuredName !== ""
                     text: heroBanner.featuredName
+                    // §REVIEW-1127 qt_ui #2：主機名稱由 server 自報，不可當 rich text 解讀
+                    textFormat: Text.PlainText
                     font.family: "Space Grotesk"
                     // Cover-story on wide, chunky headline on narrow.
                     font.pointSize: heroBanner.wide ? 46 : 28

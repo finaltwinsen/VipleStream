@@ -836,12 +836,21 @@ void Session::clConnectionStatusUpdate(int connectionStatus)
     statusEvent.type = SDL_USEREVENT;
     statusEvent.user.code = SDL_CODE_CONNECTION_STATUS;
     statusEvent.user.data1 = (void*)(intptr_t)connectionStatus;
-    SDL_PushEvent(&statusEvent);
+    // 11-27 驗證時有兩輪提示沒出現、主執行緒也沒收到事件（之後重跑 6 輪都正常、重現不出來）。
+    // 推送失敗才印；處理端另有一行 log，兩者都沒有＝事件在佇列裡遺失
+    const int pushRc = SDL_PushEvent(&statusEvent);
+    if (pushRc != 1) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-NET] connection status event not queued: rc=%d %s",
+                    pushRc, pushRc < 0 ? SDL_GetError() : "");
+    }
 }
 
 // §REVIEW-1127 qt_stream #3：主執行緒上畫連線狀態的 overlay。事件排隊期間設定或滑鼠模式可能變了，所以再檢查一次。
 void Session::handleConnectionStatusOverlay(int connectionStatus)
 {
+    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "[VIPLE-NET] connection status overlay: status=%d warnings=%d mouseEmu=%d",
+                connectionStatus, (int)m_Preferences->connectionWarnings, (int)m_MouseEmulationRefCount);
     if (!m_Preferences->connectionWarnings || m_MouseEmulationRefCount > 0) {
         return;
     }

@@ -255,6 +255,7 @@ CenteredGridView {
                 Text {
                     visible: libraryBanner.featuredName !== ""
                     text: libraryBanner.featuredName.toUpperCase()
+                    textFormat: Text.PlainText  // §REVIEW-1127 qt_ui #2：應用程式名稱來自 host
                     font.family: "Space Grotesk"
                     font.pointSize: libraryBanner.wide ? 46 : 28
                     font.bold: true

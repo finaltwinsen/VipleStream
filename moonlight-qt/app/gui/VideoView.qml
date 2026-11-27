@@ -729,6 +729,7 @@ Item {
                                     spacing: 12
                                     Label {
                                         text: model.name + (model.isDir ? "/" : "")
+                                        textFormat: Text.PlainText  // §REVIEW-1127 qt_ui #2：檔名來自 host
                                         font.pointSize: 14
                                         font.bold: model.isDir
                                         elide: Text.ElideMiddle
@@ -977,6 +978,7 @@ Item {
                                     }
                                     Label {
                                         text: model.name
+                                        textFormat: Text.PlainText  // §REVIEW-1127 qt_ui #2：檔名來自 host
                                         font.pointSize: 14
                                         font.bold: model.isDir
                                         elide: Text.ElideMiddle
