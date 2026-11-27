@@ -79,6 +79,40 @@ namespace safe {
       return val;
     }
 
+    /**
+     * @brief §ENC-PACE（2026-11-27）：等到 deadline 為止。和 pop(delay) 不同，被 wake() 叫醒時會重新檢查時間，
+     *        所以搭配外部的高精度計時器（pop_waker_t）就能準時醒來。
+     * @details MinGW 的 condition_variable 有逾時的等待一律被拉長到約 16 ms（host 實測：wait_for(6.94 ms) 實際
+     *          15.9～16.2 ms，系統計時器調到 0.5 ms 也一樣；同一台的高精度 waitable timer 是 7.1 ms）。
+     *          2D 靜態畫面要求 144 fps 時重複幀只出得了 64 fps、60 fps 只剩 34 fps（匿名 log 與 [VIPLE-CAP] 實測）。
+     *          這裡的 wait_until 只當保險；準時靠呼叫端在 deadline 呼叫 wake()。
+     */
+    template<class Clock, class Dur>
+    status_t pop_until(std::chrono::time_point<Clock, Dur> deadline) {
+      std::unique_lock ul {_lock};
+
+      if (!_continue) {
+        return util::false_v<status_t>;
+      }
+
+      while (!_status) {
+        if (!_continue || Clock::now() >= deadline) {
+          return util::false_v<status_t>;
+        }
+        _cv.wait_until(ul, deadline);
+      }
+
+      auto val = std::move(_status);
+      _status = util::false_v<status_t>;
+      return val;
+    }
+
+    /// 叫醒在 pop_until 等待的執行緒（不放任何東西進佇列）
+    void wake() {
+      std::lock_guard ul {_lock};
+      _cv.notify_all();
+    }
+
     // pop and view should not be used interchangeably
     status_t view() {
       std::unique_lock ul {_lock};

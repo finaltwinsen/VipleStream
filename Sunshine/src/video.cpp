@@ -2530,6 +2530,84 @@ namespace video {
     }
   }  // namespace
 
+  /**
+   * @brief §ENC-PACE（2026-11-27）：在指定時刻呼叫 wake() 叫醒在 queue_t::pop_until 等待的編碼執行緒。
+   * @details MinGW 的 condition_variable 逾時一律被拉長到約 16 ms（見 thread_safe.h 的 pop_until），所以逾時改由
+   *          一條執行緒用平台的高精度計時器等到 deadline 再 wake()。有新影像進來時 raise() 的 notify 照樣立刻喚醒，
+   *          不增加延遲；arm() 只是換掉下一個 deadline。高精度計時器建不起來時 armed 永遠不觸發，退回原本的行為。
+   */
+  template<class Q>
+  class pop_waker_t {
+  public:
+    explicit pop_waker_t(Q *q):
+        q_ {q} {
+      th_ = std::thread([this]() {
+        run();
+      });
+    }
+
+    ~pop_waker_t() {
+      {
+        std::lock_guard lk {m_};
+        stop_ = true;
+      }
+      cv_.notify_all();
+      if (th_.joinable()) {
+        th_.join();
+      }
+    }
+
+    void arm(std::chrono::steady_clock::time_point deadline) {
+      {
+        std::lock_guard lk {m_};
+        deadline_ = deadline;
+        armed_ = true;
+      }
+      cv_.notify_all();
+    }
+
+  private:
+    void run() {
+      platf::set_thread_name("enc_pop_waker");
+      auto timer = platf::create_high_precision_timer();
+      if (!timer || !*timer) {
+        return;  // 沒有高精度計時器：pop_until 退回 wait_until（約 16 ms 一格），行為同修正前
+      }
+      std::unique_lock lk {m_};
+      while (!stop_) {
+        cv_.wait(lk, [this]() {
+          return stop_ || armed_;
+        });
+        if (stop_) {
+          break;
+        }
+        const auto d = deadline_;
+        armed_ = false;
+        lk.unlock();
+        const auto now = std::chrono::steady_clock::now();
+        if (d > now) {
+          timer->sleep_for(d - now);
+        }
+        lk.lock();
+        // 睡的期間被重新 arm 成更晚的時刻：這一次不叫醒（下一圈照新的 deadline 睡）
+        if (armed_ && deadline_ > d) {
+          continue;
+        }
+        lk.unlock();
+        q_->wake();
+        lk.lock();
+      }
+    }
+
+    Q *q_;
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::chrono::steady_clock::time_point deadline_ {};
+    bool armed_ = false;
+    bool stop_ = false;
+    std::thread th_;
+  };
+
   void encode_run(
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
@@ -2841,6 +2919,8 @@ namespace video {
     // §LOGDROP-1127 [VIPLE-CAP]：2D 擷取端 10 秒統計（對照 VR 的 [VIPLE-VR-CAP]）。
     // 目的是把「主機跟不上（convert／encode 慢）」和「重複幀路徑慢」分開；只加統計，不改節拍。
     const bool cap_track = config.captureSource == 0;
+    std::unique_ptr<pop_waker_t<std::remove_reference_t<decltype(*images)>>> pop_waker;  // §ENC-PACE：第一次用到才建
+    std::chrono::steady_clock::time_point pop_anchor {};  // §ENC-PACE：上一次取得影像（或逾時）的時刻
     uint32_t cap_copied = 0;  // pop 到新影像的次數
     uint32_t cap_dup = 0;  // 逾時重編上一張的次數
     uint32_t cap_pop_timeout = 0;  // pop(max_frametime) 逾時的次數
@@ -3107,7 +3187,22 @@ namespace video {
 
       // Encode at a minimum FPS to avoid image quality issues with static content
       if (!requested_idr_frame || images->peek()) {
-        if (auto img = images->pop(max_frametime)) {
+        // §ENC-PACE：準時的逾時（見 pop_waker_t）；pop(max_frametime) 在 MinGW 一律被拉長到約 16 ms
+        // 以「上一次取得影像（新的或逾時）的時刻」為基準排下一個 deadline：從「編完之後」才算會把編碼時間加進週期
+        // （實測 144 fps 要求只出 99.6 fps＝6.94＋2.84 ms）。超過一個週期沒回來（編碼更久）就從現在算，不追趕。
+        const auto pop_now = std::chrono::steady_clock::now();
+        const auto pop_period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(max_frametime);
+        auto pop_deadline = pop_anchor + pop_period;
+        if (pop_anchor == std::chrono::steady_clock::time_point {} || pop_deadline < pop_now || pop_deadline > pop_now + pop_period) {
+          pop_deadline = pop_now + pop_period;
+        }
+        if (!pop_waker) {
+          pop_waker = std::make_unique<pop_waker_t<std::remove_reference_t<decltype(*images)>>>(&*images);
+        }
+        pop_waker->arm(pop_deadline);
+        auto img = images->pop_until(pop_deadline);
+        pop_anchor = img ? std::chrono::steady_clock::now() : pop_deadline;
+        if (img) {
           // §VR-RATE-AUTO（2026-11-08）：串流中途降成半速時，driver 照原本的更新率出幀，這裡每 div 張只編一張。
           // 跳過的那張不編碼、不送、不佔幀號（client 收到的幀號照樣連續），下一輪等下一張
           if (vr_state && config.captureSource == 1) {
