@@ -4,6 +4,9 @@
 #define RTSP_CONNECT_TIMEOUT_SEC 10
 #define RTSP_RECEIVE_TIMEOUT_SEC 15
 #define RTSP_RETRY_DELAY_MS 500
+// §REVIEW-1127 commonc #1：TCP 回應的總時限與大小上限（寬鬆值，正常回應遠低於此）
+#define RTSP_TOTAL_RECEIVE_TIMEOUT_MS 60000ULL
+#define RTSP_MAX_RESPONSE_BYTES (1024 * 1024)
 
 static int currentSeqNumber;
 static char rtspTargetUrl[256];
@@ -380,6 +383,7 @@ static bool transactRtspMessageTcp(PRTSP_MESSAGE request, PRTSP_MESSAGE response
     char* responseBuffer;
     int responseBufferSize;
     int connectRetries;
+    uint64_t rtspReadStartMs;
 
     *error = -1;
     ret = false;
@@ -445,8 +449,31 @@ static bool transactRtspMessageTcp(PRTSP_MESSAGE request, PRTSP_MESSAGE response
     // Read the response until the server closes the connection
     offset = 0;
     responseBufferSize = 0;
+    // §REVIEW-1127 commonc #1：持續滴流或灌資料的回應不能把連線建立卡住任意久、讓記憶體
+    // 一直長。總時限與大小上限都取正常值的數倍以上（單次等待仍是 15 秒），正常回應不受影響。
+    rtspReadStartMs = PltGetMillis();
     for (;;) {
         struct pollfd pfd;
+        uint64_t rtspElapsedMs;
+        int rtspWaitMs;
+
+        if (ConnectionInterrupted) {
+            // §REVIEW-1127 commonc #1：使用者取消時不必等滿逾時
+            *error = -1;
+            Limelog("[VIPLE-RTSP] RTSP read interrupted\n");
+            goto Exit;
+        }
+
+        rtspElapsedMs = PltGetMillis() - rtspReadStartMs;
+        if (rtspElapsedMs >= RTSP_TOTAL_RECEIVE_TIMEOUT_MS) {
+            *error = ETIMEDOUT;
+            Limelog("[VIPLE-RTSP] RTSP response exceeded total time limit (%d bytes so far)\n", offset);
+            goto Exit;
+        }
+        rtspWaitMs = RTSP_RECEIVE_TIMEOUT_SEC * 1000;
+        if ((uint64_t)rtspWaitMs > RTSP_TOTAL_RECEIVE_TIMEOUT_MS - rtspElapsedMs) {
+            rtspWaitMs = (int)(RTSP_TOTAL_RECEIVE_TIMEOUT_MS - rtspElapsedMs);
+        }
 
         if (offset >= responseBufferSize) {
             responseBufferSize = offset + 16384;
@@ -459,7 +486,7 @@ static bool transactRtspMessageTcp(PRTSP_MESSAGE request, PRTSP_MESSAGE response
 
         pfd.fd = sock;
         pfd.events = POLLIN;
-        err = pollSockets(&pfd, 1, RTSP_RECEIVE_TIMEOUT_SEC * 1000);
+        err = pollSockets(&pfd, 1, rtspWaitMs);
         if (err == 0) {
             *error = ETIMEDOUT;
             Limelog("RTSP request timed out\n");
@@ -484,6 +511,12 @@ static bool transactRtspMessageTcp(PRTSP_MESSAGE request, PRTSP_MESSAGE response
         }
         else {
             offset += err;
+            if (offset > RTSP_MAX_RESPONSE_BYTES) {
+                // §REVIEW-1127 commonc #1：正常回應（含 DESCRIBE 的 SDP）只有數 KB
+                *error = -1;
+                Limelog("[VIPLE-RTSP] RTSP response too large (%d bytes)\n", offset);
+                goto Exit;
+            }
         }
     }
 

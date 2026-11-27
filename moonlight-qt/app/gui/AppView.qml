@@ -426,10 +426,21 @@ CenteredGridView {
             }
 
             // Display a tooltip with the full name if it's truncated
-            ToolTip.text: model.name
-            ToolTip.delay: 1000
-            ToolTip.timeout: 5000
-            ToolTip.visible: (parent.hovered || parent.highlighted) && (!appNameText || appNameText.truncated)
+            // §REVIEW-1127 qt_ui #2：附加的 ToolTip 是全程式共用的一個、文字格式是 AutoText，應用程式名稱會被當成 HTML。
+            // 改用這張圖自己的 ToolTip，內容設成純文字（同 StreamSegue 的 toast）；寬度上限比照 AppContent 對共用 ToolTip 的 400
+            ToolTip {
+                id: appNameToolTip
+                text: model.name
+                delay: 1000
+                timeout: 5000
+                visible: (appIcon.parent.hovered || appIcon.parent.highlighted) && (!appNameText || appNameText.truncated)
+                width: Math.min(implicitWidth, 400 + leftPadding + rightPadding)
+                Component.onCompleted: {
+                    if (contentItem) {
+                        contentItem.textFormat = Text.PlainText
+                    }
+                }
+            }
         }
 
         Loader {
@@ -531,6 +542,7 @@ CenteredGridView {
                 Label {
                     id: gameNameLabel
                     text: model.name
+                    textFormat: Text.PlainText  // §REVIEW-1127 qt_ui #2：應用程式名稱來自 host，不當成 HTML
                     font.pointSize: 18
                     font.bold: true
                     font.letterSpacing: -0.3

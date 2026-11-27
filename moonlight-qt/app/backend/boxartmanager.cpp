@@ -1,8 +1,12 @@
 #include "boxartmanager.h"
 #include "../path.h"
 
+#include <QDateTime>
 #include <QImageReader>
 #include <QImageWriter>
+
+// §REVIEW-1127 qt_ui #3：失敗後多久內不再重試同一張封面
+static constexpr qint64 kBoxArtRetryAfterFailMs = 60 * 1000;
 
 // §REVIEW-1104：uniqueid 來自 serverinfo，只允許 hex 與連字號，否則會被當成路徑走出 boxart
 static bool isSafeBoxArtUuid(const QString& uuid)
@@ -137,6 +141,20 @@ QUrl BoxArtManager::loadBoxArt(NvComputer* computer, NvApp& app)
         return QUrl::fromLocalFile(cacheFile.fileName());
     }
 
+    // §REVIEW-1127 qt_ui #3：已經在下載、或 60 秒內剛失敗過，就不再開一個工作
+    const QString key = boxArtKey(computer, app.id);
+    if (m_InFlight.contains(key)) {
+        return QUrl("qrc:/res/no_app_image.png");
+    }
+    auto failIt = m_FailedAtMs.find(key);
+    if (failIt != m_FailedAtMs.end()) {
+        if (QDateTime::currentMSecsSinceEpoch() - failIt.value() < kBoxArtRetryAfterFailMs) {
+            return QUrl("qrc:/res/no_app_image.png");
+        }
+        m_FailedAtMs.erase(failIt);
+    }
+    m_InFlight.insert(key);
+
     // If we get here, we need to fetch asynchronously.
     // Kick off a worker on our thread pool to do just that.
     NetworkBoxArtLoadTask* netLoadTask = new NetworkBoxArtLoadTask(this, computer, app);
@@ -163,8 +181,25 @@ void BoxArtManager::deleteBoxArt(NvComputer* computer)
     }
 }
 
+QString BoxArtManager::boxArtKey(NvComputer* computer, int appId)
+{
+    // §REVIEW-1127 qt_ui #3：只用指標的值、不解參照——完成的 slot 回來時主機可能已經被刪掉。
+    // 指標被新主機重用時最多讓那台的封面晚一輪（進行中的工作結束就解除，失敗的記錄 60 秒過期）
+    return QString::number(reinterpret_cast<quintptr>(computer), 16) + QLatin1Char('/') + QString::number(appId);
+}
+
 void BoxArtManager::handleBoxArtLoadComplete(NvComputer* computer, NvApp app, QUrl image)
 {
+    // §REVIEW-1127 qt_ui #3：工作結束，解除進行中；失敗就記時刻，60 秒內不重試
+    const QString key = boxArtKey(computer, app.id);
+    m_InFlight.remove(key);
+    if (image.isEmpty()) {
+        m_FailedAtMs.insert(key, QDateTime::currentMSecsSinceEpoch());
+    }
+    else {
+        m_FailedAtMs.remove(key);
+    }
+
     if (!image.isEmpty()) {
         emit boxArtLoadComplete(computer, app, image);
     }

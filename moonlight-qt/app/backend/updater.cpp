@@ -456,7 +456,9 @@ void Updater::handleAssetListFinished()
         else {
             const QString normalizedPath = assetUrl.adjusted(QUrl::NormalizePathSegments).path();
             allowed = assetUrl.isValid() && assetUrl.scheme() == QLatin1String("https")
-                    && assetUrl.host() == QLatin1String("github.com") && assetUrl.port(-1) != -1
+                    // 沒寫埠號或寫 443 才放行。v2.0.285 把「有埠號就拒絕」改寫成「全部成立才放行」時這一項沒反過來
+                    //（port(-1) != -1），GitHub 的網址沒有埠號 → 正式版自我更新一律回 unexpected download address
+                    && assetUrl.host() == QLatin1String("github.com") && assetUrl.port(443) == 443
                     && assetUrl.userInfo().isEmpty() && !m_AssetUrl.contains(QLatin1Char('\\'))
                     && !dotDotSegment
                     && normalizedPath.startsWith(QLatin1String("/finaltwinsen/VipleStream/releases/download/"));

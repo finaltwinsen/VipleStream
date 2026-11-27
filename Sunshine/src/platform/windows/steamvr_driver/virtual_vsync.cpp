@@ -124,7 +124,7 @@ namespace vrdrv {
     return r;
   }
 
-  uint32_t virtual_vsync_t::wait_until(void *timer, int64_t target) const {
+  uint32_t virtual_vsync_t::wait_until(void *timer, int64_t target, bool spin) const {
     const int64_t start = now_qpc();
     if (!active() || target <= start) {
       return 0;
@@ -135,7 +135,8 @@ namespace vrdrv {
     if (end - start > two_t) {
       end = start + two_t;
     }
-    const int64_t spin_ticks = qpf_ * k_spin_us / 1000000;
+    // §REVIEW-1127 vr #1：不忙等時整段交給 timer（timer 早醒的那一點點不補，閒置時不需要準）
+    const int64_t spin_ticks = spin ? qpf_ * k_spin_us / 1000000 : 0;
     const int64_t sleep_ticks = end - start - spin_ticks;
     if (sleep_ticks > 0) {
       LARGE_INTEGER due;
@@ -152,7 +153,7 @@ namespace vrdrv {
         }
       }
     }
-    while (now_qpc() < end) {
+    while (spin && now_qpc() < end) {
       YieldProcessor();
     }
     return (uint32_t) ((now_qpc() - start) * 1000000 / qpf_);

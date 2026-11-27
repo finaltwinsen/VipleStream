@@ -44,7 +44,8 @@ namespace vrdrv {
 
     // production／E3：高解析度 waitable timer 睡到 target − 300 µs，再 spin 到 target；睡眠上限 min(target − now, 2T)。
     // timer 由呼叫端建立（CREATE_WAITABLE_TIMER_HIGH_RESOLUTION；nullptr 時退回 Sleep）。回傳實際睡了多少 µs。
-    uint32_t wait_until(void *timer, int64_t target_qpc) const;
+    // §REVIEW-1127 vr #1：spin=false 時不忙等最後 300 µs，只靠 timer 睡到 target（沒有串流時用，節拍準不準沒人在乎）。
+    uint32_t wait_until(void *timer, int64_t target_qpc, bool spin = true) const;
 
   private:
     int64_t qpf_ = 0;

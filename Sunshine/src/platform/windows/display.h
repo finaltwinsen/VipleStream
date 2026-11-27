@@ -438,6 +438,8 @@ namespace platf::dxgi {
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame consumed_frame {nullptr};
     SRWLOCK frame_lock = SRWLOCK_INIT;
     CONDITION_VARIABLE frame_present_cv;
+    // §REVIEW-1127 video #13：最後一次成功套用的游標擷取狀態（-1＝未知），避免每幀跨 ABI 讀 IsCursorCaptureEnabled
+    int cursor_capture_applied = -1;
 
     void on_frame_arrived(winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool const &sender, winrt::Windows::Foundation::IInspectable const &);
 

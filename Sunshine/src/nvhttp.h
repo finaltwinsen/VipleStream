@@ -113,6 +113,9 @@ namespace nvhttp {
 
     /// §REVIEW-1111：這筆配對是什麼時候開始的（逾時清除、PIN 套用到最新的一筆）
     std::chrono::steady_clock::time_point created = std::chrono::steady_clock::now();
+
+    /// §REVIEW-1127 web_sec #1：發起這筆配對的來源位址（每個 IP 的待配對上限用）
+    std::string remote_addr = {};
   };
 
   /**
@@ -176,12 +179,13 @@ namespace nvhttp {
    * @brief Compare the user supplied pin to the Moonlight pin.
    * @param pin The user supplied pin.
    * @param name The user supplied name.
+   * @param error 失敗時填入給網頁看的原因（可為 nullptr）。§REVIEW-1127 web_sec N1
    * @return `true` if the pin is correct, `false` otherwise.
    * @examples
    * bool pin_status = nvhttp::pin("1234", "laptop");
    * @examples_end
    */
-  bool pin(std::string pin, std::string name);
+  bool pin(std::string pin, std::string name, std::string *error = nullptr);
 
   /**
    * @brief Remove single client.

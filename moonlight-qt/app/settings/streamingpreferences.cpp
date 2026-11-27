@@ -3,6 +3,7 @@
 #include "backend/sfenv.h"
 
 #include <QSettings>
+#include <QFile>
 #include <QTranslator>
 #include <QCoreApplication>
 #include <QLocale>
@@ -734,6 +735,16 @@ void StreamingPreferences::save()
     // kill during streaming loses the user's changes (e.g. FRUC
     // toggle reverts to the pre-session value on next launch).
     settings.sync();
+#ifndef Q_OS_WIN
+    // §REVIEW-1127 qt_ui #12：relay PSK 以明文存在這個檔案（私鑰也在，見 IdentityManager），只讓自己讀寫
+    {
+        const QString settingsPath = settings.fileName();
+        const QFileDevice::Permissions want = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
+        if (!settingsPath.isEmpty() && QFile::exists(settingsPath) && QFile::permissions(settingsPath) != want) {
+            QFile::setPermissions(settingsPath, want);
+        }
+    }
+#endif
     qInfo() << "[VIPLE-PREFS] save: sync complete, fps =" << fps
             << "enableFrameInterpolation =" << enableFrameInterpolation;
 }

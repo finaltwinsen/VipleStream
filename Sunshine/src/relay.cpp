@@ -991,6 +991,9 @@ namespace relay {
           }
           // §REVIEW-1103：proxy 是從 127.0.0.1 打本機 HTTP，等於幫 relay 對端繞過 nvhttp 的
           // localhost 檢查 → 只放行 client 經 relay 會用到的端點（Qt／Android 的 relay 路徑只用這幾個）。
+          // §REVIEW-1127 server_net #1：host 沒設 relay_psk 時，relay 上任何知道 host UUID 的人都能送 proxy 請求，
+          // 而 /launch 的 rikey 由呼叫端提供＝拿到整場串流。沒有 PSK 就不轉發會產生副作用的三個端點。
+          bool proxyDeniedNoPsk = false;
           {
             const auto endpoint = path.substr(0, path.find('?'));
             static const char *const kAllowed[] = {"/serverinfo", "/applist", "/launch", "/resume", "/cancel"};
@@ -1005,14 +1008,24 @@ namespace relay {
               BOOST_LOG(warning) << "[RELAY-PROXY] Path not allowed via relay: " << endpoint;
               continue;
             }
+            if (relay_psk.empty() && (endpoint == "/launch" || endpoint == "/resume" || endpoint == "/cancel")) {
+              proxyDeniedNoPsk = true;
+            }
           }
 
-          BOOST_LOG(info) << "[RELAY-PROXY] Request: " << path << " (from=" << fromUuid.substr(0, 12) << ")";
+          // §REVIEW-1127 web_sec #7：query string 裡有 rikey，log 只記端點
+          BOOST_LOG(info) << "[RELAY-PROXY] Request: " << path.substr(0, path.find('?')) << " (from=" << fromUuid.substr(0, 12) << ")";
 
           // Make local HTTPS request to Sunshine (localhost)
           std::string responseBody;
           int httpStatus = 500;
 
+          if (proxyDeniedNoPsk) {
+            BOOST_LOG(warning) << "[RELAY-PROXY] " << path.substr(0, path.find('?'))
+                               << " refused: relay_psk is not set on this host (set relay_psk to allow launch/resume/cancel via relay)";
+            httpStatus = 403;
+            responseBody = "relay_psk not configured on host";
+          } else {
           // All routes go to HTTP (47989) now — /launch and /resume are registered on HTTP with localhost guard
           uint16_t localPort = net::map_port(0);
           // /launch needs longer timeout (encoder probe + display config can take 10+ seconds)
@@ -1036,7 +1049,10 @@ namespace relay {
 #endif
 
               if (::connect(localSock, (struct sockaddr *)&localAddr, sizeof(localAddr)) == 0) {
-                std::string httpReq = "GET " + path + " HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+                // §REVIEW-1127 web_sec #7：帶行程內的隨機 token。nvhttp 的 HTTP 本機端點（/applist、/launch、/resume、/cancel）
+                // 只認這個 token，主機上的網頁（no-cors <img>／fetch 帶不了自訂標頭）與其他程式就打不進來。
+                std::string httpReq = "GET " + path + " HTTP/1.0\r\nHost: localhost\r\nX-Viple-Relay: " + http::local_proxy_token() +
+                                      "\r\nConnection: close\r\n\r\n";
                 ::send(localSock, httpReq.c_str(), (int)httpReq.size(), 0);
                 char buf[65536];
                 std::string rawResp;
@@ -1058,6 +1074,7 @@ namespace relay {
               closesocket(localSock);
             }
           }
+          }  // §REVIEW-1127 server_net #1：proxyDeniedNoPsk 的 else
 
           BOOST_LOG(info) << "[RELAY-PROXY] Response: " << httpStatus << " (" << responseBody.size() << " bytes)";
 

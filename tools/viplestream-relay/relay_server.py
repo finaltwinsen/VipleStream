@@ -430,6 +430,24 @@ async def handle_client(reader, writer, psk: str):
             msg_type = data.get("type", "")
             logger.info(f"[RECV] {addr} type={msg_type} {json.dumps(data, ensure_ascii=False)}")
 
+            # §REVIEW-1127 server_net #1：PSK 只在 register 驗證；原本 http_proxy 不看這條連線有沒有 register，
+            # 任何連得上 relay、又知道 host UUID 的人都能送 proxy 請求（from_uuid 是空字串）。
+            # 代理與 TCP 通道都要求先 register 成功；Qt／Android client 與 host 本來就會先 register，相容。
+            if not peer_uuid and msg_type in ("http_proxy", "http_proxy_response",
+                                              "tcp_tunnel_open", "tcp_tunnel_data", "tcp_tunnel_closed",
+                                              "tcp_tunnel_reconnect", "tcp_tunnel_close_all"):
+                logger.warning(f"[AUTH] {addr} sent {msg_type} before register - rejected")
+                if msg_type == "http_proxy":
+                    await ws_send(writer, json.dumps({
+                        "type": "http_proxy_response",
+                        "request_id": data.get("request_id", ""),
+                        "status": 403,
+                        "body": "register first"
+                    }))
+                else:
+                    await ws_send(writer, json.dumps({"type": "error", "msg": "register first"}))
+                continue
+
             if msg_type == "register":
                 uuid = data.get("uuid", "")
                 role = data.get("role", "client")

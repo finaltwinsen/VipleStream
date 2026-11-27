@@ -23,7 +23,9 @@ public class IdentityManager {
             uniqueId = generateNewUniqueId(c);
         }
 
-        LimeLog.info("UID is now: "+uniqueId);
+        // §REVIEW-1127 android #5：logcat 會經 LogDrop 上傳，完整 uniqueid 能跟 host 端的 client
+        // 識別碼對起來；只印前 4 碼供辨識
+        LimeLog.info("UID is now: " + (uniqueId.length() > 4 ? uniqueId.substring(0, 4) + "..." : uniqueId));
     }
 
     public String getUniqueId() {

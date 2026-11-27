@@ -36,6 +36,21 @@ QString updatedPath()
     return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/yt-dlp");
 }
 
+// §REVIEW-1127 qt_ui #11：原本以 PATH 上的 "python3" 執行。Flatpak 裡用 runtime 固定提供的 /usr/bin/python3；
+// 其他平台用 QStandardPaths 解析一次（記下絕對路徑，之後不再受 PATH 變動影響）；都找不到才照舊交給 PATH
+QString pythonExecutable()
+{
+    static const QString s_Python = []() {
+        const QString flatpakPython = QStringLiteral("/usr/bin/python3");
+        if (QFileInfo::exists(QStringLiteral("/.flatpak-info")) && QFileInfo(flatpakPython).isExecutable()) {
+            return flatpakPython;
+        }
+        const QString found = QStandardPaths::findExecutable(QStringLiteral("python3"));
+        return found.isEmpty() ? QStringLiteral("python3") : found;
+    }();
+    return s_Python;
+}
+
 // 頭盔能硬體解的：不要 AV1、不要 HDR、最高 2160p；影像＋音訊分開優先，沒有就整條的
 const char* const kFormat = "bv*[vcodec!*=av01][dynamic_range=SDR][height<=2160]+ba/b[vcodec!*=av01][dynamic_range=SDR]/b";
 
@@ -237,7 +252,7 @@ WebResolver::Result WebResolver::resolve(const QString& pageUrl, int timeoutMs)
     QProcess p;
     QStringList args = baseArgs(script);
     args << QStringLiteral("-J") << QStringLiteral("-f") << QString::fromLatin1(kFormat) << QStringLiteral("--") << pageUrl;
-    p.start(QStringLiteral("python3"), args);
+    p.start(pythonExecutable(), args);  // §REVIEW-1127 qt_ui #11
     bool started = false;
     int startWaited = 0;
     while (startWaited < 5000 && !cancelled()) {
@@ -365,7 +380,7 @@ QString WebResolver::version()
         return QString();
     }
     QProcess p;
-    p.start(QStringLiteral("python3"), {script, QStringLiteral("--version")});
+    p.start(pythonExecutable(), {script, QStringLiteral("--version")});  // §REVIEW-1127 qt_ui #11
     if (p.waitForFinished(15000) && p.exitCode() == 0) {
         m_Version = QString::fromUtf8(p.readAllStandardOutput()).trimmed();
     }
@@ -414,7 +429,7 @@ void WebResolver::search(const QString& query, int n)
     QStringList args = baseArgs(script);
     args << QStringLiteral("--flat-playlist") << QStringLiteral("-J") << QStringLiteral("--")
          << QStringLiteral("ytsearch%1:%2").arg(n).arg(query);
-    proc->start(QStringLiteral("python3"), args);
+    proc->start(pythonExecutable(), args);  // §REVIEW-1127 qt_ui #11
 }
 
 void WebResolver::update()

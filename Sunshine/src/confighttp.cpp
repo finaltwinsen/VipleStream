@@ -15,8 +15,12 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
+#include <map>
+#include <mutex>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 // lib includes
 #include <boost/algorithm/string.hpp>
@@ -92,7 +96,8 @@ namespace confighttp {
     BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
 
     for (auto &[name, val] : request->header) {
-      BOOST_LOG(debug) << name << " -- " << (name == "Authorization" ? "CREDENTIALS REDACTED" : val);
+      // §REVIEW-1127 web_sec #17：改用不分大小寫的共用遮罩清單。
+      BOOST_LOG(debug) << name << " -- " << (http::is_sensitive_header(name) ? "CREDENTIALS REDACTED"s : val);
     }
 
     BOOST_LOG(debug) << " [--] "sv;
@@ -183,12 +188,108 @@ namespace confighttp {
    * @param request The HTTP request object.
    * @return True if the user is authenticated, false otherwise.
    */
-  bool authenticate(const resp_https_t &response, const req_https_t &request) {
+  /**
+   * @brief 來源位址是否在 origin_web_ui_allowed 允許的範圍內；不在就回 403。
+   * §REVIEW-1127 web_sec #24：authenticate 與首次設定的 savePassword 共用同一個來源檢查。
+   */
+  bool check_origin(const resp_https_t &response, const req_https_t &request) {
     auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
 
     if (const auto ip_type = net::from_address(address); ip_type > http::origin_web_ui_allowed) {
       BOOST_LOG(info) << "Web UI: ["sv << address << "] -- denied"sv;
       response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      return false;
+    }
+    return true;
+  }
+
+  // §REVIEW-1127 web_sec #3：網頁登入失敗節流（每個來源 IP）。
+  // 連續失敗 k_auth_fail_free 次之後開始封鎖，封鎖時間從 k_auth_lock_base 起每次加倍、
+  // 上限 k_auth_lock_max；封鎖期間直接回 401、不做雜湊。成功一次就清掉該 IP 的紀錄。
+  // loopback 不節流：托盤與本機網頁輪詢若帶著舊密碼，不能把本機使用者自己鎖在門外。
+  // 只算「帶了帳密但錯誤」的請求；瀏覽器第一次不帶 Authorization 的 401 不算失敗。
+  // 同一組錯誤帳密重複送（例如另一台改了密碼，這個分頁還拿舊密碼在輪詢）只算一次，
+  // 不然使用者自己的舊分頁就會把同 IP 鎖住；暴力破解每次都換密碼，照樣會被計數。
+  struct auth_fail_t {
+    int count = 0;
+    std::chrono::steady_clock::time_point locked_until {};
+    std::chrono::steady_clock::time_point last {};
+    std::vector<std::size_t> recent;  ///< 最近幾組失敗的 Authorization 值（std::hash）
+  };
+
+  std::map<std::string, auth_fail_t, std::less<>> auth_fails;  // NOSONAR(cpp:S5421) - intentionally mutable global
+  std::mutex auth_fails_mutex;  // NOSONAR(cpp:S5421) - intentionally mutable global
+  constexpr int k_auth_fail_free = 10;
+  constexpr auto k_auth_lock_base = std::chrono::seconds(30);
+  constexpr auto k_auth_lock_max = std::chrono::minutes(15);
+  constexpr auto k_auth_fail_forget = std::chrono::hours(1);
+  constexpr std::size_t k_auth_fail_max_entries = 4096;
+
+  bool is_loopback_address(const std::string &address) {
+    return address == "127.0.0.1" || address == "::1";
+  }
+
+  /// 這個 IP 目前是否在封鎖期間。
+  bool auth_locked(const std::string &address) {
+    if (is_loopback_address(address)) {
+      return false;
+    }
+    std::lock_guard lg {auth_fails_mutex};
+    const auto it = auth_fails.find(address);
+    return it != auth_fails.end() && std::chrono::steady_clock::now() < it->second.locked_until;
+  }
+
+  void auth_record_failure(const std::string &address, const std::string &raw_auth) {
+    if (is_loopback_address(address)) {
+      return;
+    }
+    const auto auth_hash = std::hash<std::string> {}(raw_auth);
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard lg {auth_fails_mutex};
+    if (auth_fails.size() >= k_auth_fail_max_entries && !auth_fails.contains(address)) {
+      // 表太大時先丟掉很久沒失敗的紀錄；仍然太大就整個清掉（寧可少擋，不要無限長）。
+      std::erase_if(auth_fails, [&](const auto &kv) {
+        return now - kv.second.last > k_auth_fail_forget && now >= kv.second.locked_until;
+      });
+      if (auth_fails.size() >= k_auth_fail_max_entries) {
+        auth_fails.clear();
+      }
+    }
+    auto &f = auth_fails[address];
+    if (now - f.last > k_auth_fail_forget && now >= f.locked_until) {
+      f.count = 0;
+      f.recent.clear();
+    }
+    f.last = now;
+    if (std::find(f.recent.begin(), f.recent.end(), auth_hash) != f.recent.end()) {
+      return;  // 同一組錯誤帳密重送，不再計數
+    }
+    if (f.recent.size() >= 16) {
+      f.recent.erase(f.recent.begin());
+    }
+    f.recent.push_back(auth_hash);
+    ++f.count;
+    if (f.count >= k_auth_fail_free) {
+      const int shift = std::min(f.count - k_auth_fail_free, 5);
+      const auto lock = std::min<std::chrono::steady_clock::duration>(k_auth_lock_base * (1 << shift), k_auth_lock_max);
+      f.locked_until = now + lock;
+      BOOST_LOG(warning) << "[VIPLE-WEBAUTH] ["sv << address << "] "sv << f.count << " failed logins, locked for "sv
+                         << std::chrono::duration_cast<std::chrono::seconds>(lock).count() << " s"sv;
+    }
+  }
+
+  void auth_record_success(const std::string &address) {
+    if (is_loopback_address(address)) {
+      return;
+    }
+    std::lock_guard lg {auth_fails_mutex};
+    auth_fails.erase(address);
+  }
+
+  bool authenticate(const resp_https_t &response, const req_https_t &request) {
+    auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
+
+    if (!check_origin(response, request)) {
       return false;
     }
 
@@ -207,11 +308,17 @@ namespace confighttp {
       return false;
     }
 
+    // §REVIEW-1127 web_sec #3：封鎖期間直接 401，不做雜湊。
+    if (auth_locked(address)) {
+      return false;
+    }
+
     const auto &rawAuth = auth->second;
     auto authData = SimpleWeb::Crypto::Base64::decode(rawAuth.substr("Basic "sv.length()));
 
     const auto index = static_cast<int>(authData.find(':'));
     if (index >= authData.size() - 1) {
+      auth_record_failure(address, rawAuth);  // §REVIEW-1127 web_sec #3
       return false;
     }
 
@@ -219,9 +326,11 @@ namespace confighttp {
     const auto password = authData.substr(index + 1);
 
     if (const auto hash = util::hex(crypto::hash(password + config::sunshine.salt)).to_string(); !boost::iequals(username, config::sunshine.username) || hash != config::sunshine.password) {
+      auth_record_failure(address, rawAuth);  // §REVIEW-1127 web_sec #3
       return false;
     }
 
+    auth_record_success(address);  // §REVIEW-1127 web_sec #3
     fg.disable();
     return true;
   }
@@ -1580,9 +1689,24 @@ pollListing();
 
         // v.dump() will dump valid json, which we do not want for strings in the config, right now
         // we should migrate the config file to straight JSON and get rid of all this nonsense
-        config_stream << k << " = " << (v.is_string() ? v.get<std::string>() : v.dump()) << std::endl;
+        const std::string value = v.is_string() ? v.get<std::string>() : v.dump();
+        // §REVIEW-1127 web_sec #5(c)：設定檔一行一鍵，鍵或值含換行會多注入一個鍵；檔案裡本來就不可能有這種值，直接拒絕。
+        if (k.find_first_of("\r\n=") != std::string::npos || value.find_first_of("\r\n") != std::string::npos) {
+          bad_request(response, request, "Invalid characters in config key or value: " + k.substr(0, 64));
+          return;
+        }
+        config_stream << k << " = " << value << std::endl;
       }
-      file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str());
+      // §REVIEW-1127 web_sec #5(b)：寫檔失敗原本仍回報成功。
+      if (file_handler::write_file(config::sunshine.config_file.c_str(), config_stream.str()) != 0) {
+        BOOST_LOG(error) << "[VIPLE-WEBCFG] saveConfig: failed to open config file for writing"sv;
+        nlohmann::json err_tree;
+        err_tree["status_code"] = 500;
+        err_tree["status"] = false;
+        err_tree["error"] = "Failed to write config file";
+        response->write(SimpleWeb::StatusCode::server_error_internal_server_error, err_tree.dump(), {{"Content-Type", "application/json"}, {"X-Frame-Options", "DENY"}, {"Content-Security-Policy", "frame-ancestors 'none';"}});
+        return;
+      }
       output_tree["status"] = true;
       send_response(response, output_tree);
     } catch (std::exception &e) {
@@ -1678,6 +1802,11 @@ pollListing();
       return;
     }
 
+    // §REVIEW-1127 web_sec #8(a)：其他 POST 端點都有 CSRF 檢查，這裡補上（網頁從允許的來源送，行為不變）。
+    if (!validate_csrf_token(response, request, get_client_id(request))) {
+      return;
+    }
+
     std::stringstream ss;
     ss << request->content.rdbuf();
     try {
@@ -1700,11 +1829,22 @@ pollListing();
           bad_request(response, request, "Only images.igdb.com is allowed");
           return;
         }
+        // §REVIEW-1127 web_sec #8(d)：只檢查主機名稱時 http:// 也會過，明文下載的圖可被竄改；網頁送的一律是 https。
+        if (!boost::istarts_with(url, "https://")) {
+          bad_request(response, request, "Only https URLs are allowed");
+          return;
+        }
         if (!http::download_file(url, path)) {
           bad_request(response, request, "Failed to download cover");
           return;
         }
       } else {
+        // §REVIEW-1127 web_sec #8(b)：base64 沒有大小上限；封面圖 10 MB 綽綽有餘（base64 約 13.4 MB）。
+        constexpr std::size_t k_cover_b64_max = 14ULL * 1024 * 1024;
+        if (const auto it = input_tree.find("data"); it != input_tree.end() && it->is_string() && it->get_ref<const std::string &>().size() > k_cover_b64_max) {
+          bad_request(response, request, "Cover image too large");
+          return;
+        }
         auto data = SimpleWeb::Crypto::Base64::decode(input_tree.value("data", ""));
 
         std::ofstream imgfile(path, std::ios::binary);  // §REVIEW-1103：文字模式會把 PNG 的 LF 轉成 CRLF
@@ -2030,7 +2170,13 @@ pollListing();
     if (!check_content_type(response, request, "application/json")) {
       return;
     }
-    if (!config::sunshine.username.empty() && !authenticate(response, request)) {
+    // §REVIEW-1127 web_sec #24：還沒有帳密時原本整段跳過 authenticate()，連來源檢查也一起跳過，
+    // 預設 `pc` 下 LAN 上的裝置也能搶先設定管理員帳密。首次設定也要先過 origin_web_ui_allowed。
+    if (config::sunshine.username.empty()) {
+      if (!check_origin(response, request)) {
+        return;
+      }
+    } else if (!authenticate(response, request)) {
       return;
     }
 
@@ -2064,8 +2210,17 @@ pollListing();
         if (config::sunshine.username.empty() || (boost::iequals(username, config::sunshine.username) && hash == config::sunshine.password)) {
           if (newPassword.empty() || newPassword != confirmPassword) {
             errors.emplace_back("Password Mismatch");
+          } else if (http::save_user_creds(config::sunshine.credentials_file, newUsername, newPassword) != 0) {
+            // §REVIEW-1127 web_sec #4：存檔失敗時舊密碼仍然有效，不能回報成功。
+            http::reload_user_creds(config::sunshine.credentials_file);
+            BOOST_LOG(error) << "[VIPLE-WEBAUTH] savePassword: failed to write credentials file"sv;
+            nlohmann::json err_tree;
+            err_tree["status_code"] = 500;
+            err_tree["status"] = false;
+            err_tree["error"] = "Failed to save credentials file";
+            response->write(SimpleWeb::StatusCode::server_error_internal_server_error, err_tree.dump(), {{"Content-Type", "application/json"}, {"X-Frame-Options", "DENY"}, {"Content-Security-Policy", "frame-ancestors 'none';"}});
+            return;
           } else {
-            http::save_user_creds(config::sunshine.credentials_file, newUsername, newPassword);
             http::reload_user_creds(config::sunshine.credentials_file);
             output_tree["status"] = true;
           }
@@ -2157,7 +2312,13 @@ pollListing();
         return;
       }
 
-      output_tree["status"] = nvhttp::pin(pin, name);
+      // §REVIEW-1127 web_sec N1：失敗原因（例如同時有多筆在等 PIN）一併回給網頁
+      std::string pin_error;
+      const bool ok = nvhttp::pin(pin, name, &pin_error);
+      output_tree["status"] = ok;
+      if (!ok && !pin_error.empty()) {
+        output_tree["error"] = pin_error;
+      }
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "SavePin: "sv << e.what();

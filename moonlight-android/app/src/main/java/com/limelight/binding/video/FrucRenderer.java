@@ -131,13 +131,11 @@ public class FrucRenderer implements IFrucBackend {
 
     public FrucRenderer(Context context) {
         this.context = context;
-        // Try writing log to Downloads (user-visible), fallback to app-private dir
+        // §REVIEW-1127 android #15：原本無條件寫到公開的 Downloads（別的 App 讀得到；同名檔被別的
+        // App 佔住時 Android 11+ 開檔失敗、整份 log 消失）。改寫到 App 專屬的外部目錄
+        // （Android/data/<pkg>/files/，adb pull 仍可取得）；同樣的內容也已經進 logcat。
         try {
-            java.io.File logDir = android.os.Environment.getExternalStoragePublicDirectory(
-                android.os.Environment.DIRECTORY_DOWNLOADS);
-            if (logDir == null || !logDir.canWrite()) {
-                logDir = context.getExternalFilesDir(null);
-            }
+            java.io.File logDir = context.getExternalFilesDir(null);
             if (logDir != null) {
                 java.io.File logFile = new java.io.File(logDir, "fruc_log.txt");
                 logWriter = new java.io.PrintWriter(new java.io.FileWriter(logFile, false));

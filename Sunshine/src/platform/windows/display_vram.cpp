@@ -1140,6 +1140,11 @@ namespace platf::dxgi {
 
       UINT dummy;
       status = dup.dup->GetFramePointerShape(img_data.size(), std::begin(img_data), &dummy, &shape_info);
+      // §REVIEW-1127 video #2：模式切換時 duplication 失效會回 ACCESS_LOST，與 next_frame 一致改走 reinit
+      if (status == DXGI_ERROR_ACCESS_LOST) {
+        BOOST_LOG(info) << "Pointer shape: desktop duplication access lost; reinitializing"sv;
+        return capture_e::reinit;
+      }
       if (FAILED(status)) {
         BOOST_LOG(error) << "Failed to get new pointer shape [0x"sv << util::hex(status).to_string_view() << ']';
 

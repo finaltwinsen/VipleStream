@@ -9,12 +9,14 @@
 #include <utility>
 
 // lib includes
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio/ssl/context.hpp>
 #include <boost/asio/ssl/context_base.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
 #include <curl/curl.h>
+#include <openssl/crypto.h>
 #include <Simple-Web-Server/server_http.hpp>
 #include <Simple-Web-Server/server_https.hpp>
 
@@ -209,6 +211,10 @@ namespace http {
     curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, (long) CURLSSLOPT_NATIVE_CA);
 #endif
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    // §REVIEW-1127 web_sec #8(c)：confighttp 只有一條 io 執行緒，下載卡住會讓整個網頁介面不回應。
+    // 封面圖只有幾百 KB，30 秒足夠；協定限制（只收 https）放在呼叫端，單元測試仍用本機 http。
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fwrite);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
 
@@ -241,5 +247,30 @@ namespace http {
     curl_free(host);
     curl_url_cleanup(curlu);
     return result;
+  }
+
+  bool is_sensitive_header(std::string_view name) {
+    // §REVIEW-1127 web_sec #17：HTTP 標頭名稱不分大小寫，原本 confighttp 只比對大小寫完全相同的 "Authorization"。
+    // X-Viple-Relay 是 relay 送本機請求時帶的行程內 token（§REVIEW-1127 web_sec #7），也不能進 log。
+    for (const auto s : {"Authorization"sv, "Proxy-Authorization"sv, "Cookie"sv, "Set-Cookie"sv, "X-CSRF-Token"sv, "X-Viple-Relay"sv}) {
+      if (boost::iequals(name, s)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const std::string &local_proxy_token() {
+    // §REVIEW-1127 web_sec #7：函式內 static 的初始化是執行緒安全的（relay 執行緒與 nvhttp 執行緒都會呼叫）
+    static const std::string token = crypto::rand_alphabet(32);
+    return token;
+  }
+
+  bool local_proxy_token_matches(std::string_view provided) {
+    const auto &token = local_proxy_token();
+    if (provided.size() != token.size()) {
+      return false;
+    }
+    return CRYPTO_memcmp(provided.data(), token.data(), token.size()) == 0;
   }
 }  // namespace http

@@ -41,6 +41,7 @@
   #include <windows.h>
   #include <dxgi1_2.h>
   #include <winternl.h>
+  #include <wtsapi32.h>  // §REVIEW-1127 web_sec #20：取各工作階段的登入使用者名稱
 
   #include "platform/windows/utf_utils.h"
 #else
@@ -506,6 +507,32 @@ namespace logdrop {
             }
           }
           if (hit_key) {
+            continue;
+          }
+        }
+        // §REVIEW-1127 web_sec #20：路徑裡的使用者名稱（C:\Users\<名稱>\…、/home/<名稱>/…）。服務以 SYSTEM 執行時
+        // 祕密字拿不到實際登入的使用者，這類路徑（例如檔案傳輸的 target=）就原樣上傳；這裡不論名稱長短都換成 <user>。
+        {
+          bool hit_path = false;
+          for (const std::string_view key : {std::string_view {"\\Users\\"}, std::string_view {"/Users/"}, std::string_view {"/home/"}}) {
+            if (!ieq_at(text, i, key)) {
+              continue;
+            }
+            std::size_t end = i + key.size();
+            while (end < text.size() && text[end] != '\\' && text[end] != '/' && text[end] != ' ' && text[end] != '\n' && text[end] != '\r' &&
+                   text[end] != '\t' && text[end] != '"' && text[end] != '\'') {
+              ++end;
+            }
+            if (end == i + key.size()) {
+              break;  // 後面沒有名稱（例如 "/home/" 結尾），照原字處理
+            }
+            out.append(text.data() + i, key.size());
+            out += "<user>";
+            i = end;
+            hit_path = true;
+            break;
+          }
+          if (hit_path) {
             continue;
           }
         }
@@ -1012,8 +1039,34 @@ namespace logdrop {
       } catch (...) {
       }
 #ifdef _WIN32
+      // §REVIEW-1127 web_sec #20：服務以 LocalSystem 執行時 USERNAME 是 SYSTEM 或「電腦名稱$」，不是登入的使用者；
+      // 拿 SYSTEM 當祕密字還會把 log 裡所有 system（system_tray…）都遮掉。這兩種跳過，
+      // 改從 WTS 取目前各工作階段（主控台與遠端桌面）的登入使用者名稱。
       if (const char *user = std::getenv("USERNAME"); user != nullptr && user[0] != '\0') {
-        add_secret(secrets, user);
+        const std::string_view u {user};
+        if (!(u.size() == 6 && ieq_at(u, 0, "SYSTEM")) && u.back() != '$') {
+          add_secret(secrets, user);
+        }
+      }
+      {
+        PWTS_SESSION_INFOW sessions = nullptr;
+        DWORD count = 0;
+        if (WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &sessions, &count) && sessions) {
+          for (DWORD k = 0; k < count; ++k) {
+            LPWSTR raw = nullptr;
+            DWORD bytes = 0;
+            if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, sessions[k].SessionId, WTSUserName, &raw, &bytes) && raw) {
+              if (raw[0] != L'\0') {
+                std::string name = utf_utils::to_utf8(std::wstring {raw});
+                if (!(name.size() == 6 && ieq_at(name, 0, "SYSTEM")) && !name.empty() && name.back() != '$') {
+                  add_secret(secrets, std::move(name));
+                }
+              }
+              WTSFreeMemory(raw);
+            }
+          }
+          WTSFreeMemory(sessions);
+        }
       }
 #else
       if (const char *user = std::getenv("USER"); user != nullptr && user[0] != '\0') {

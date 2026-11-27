@@ -950,6 +950,11 @@ void ScHidPassthrough::readLoop(ScHidThreadCtx* ctx) {
     uint32_t printedFeat = 0;
     bool warnedNoPackets = false;
     Uint32 allErrSince = 0;             // §SC-HOTPLUG：所有介面同時讀取失敗的起點（0 = 沒有）
+    // §REVIEW-1127 qt_stream #5：最近一次任何介面讀到資料（n > 0）的時刻。dongle 插著、控制器睡著或沒配對時
+    // 各介面都回 0，原本整場每 1 ms 空轉一輪；超過 kIdleBackoffAfterMs 沒資料就把間隔放寬
+    Uint32 lastRxTick = startTick;
+    static constexpr Uint32 kIdleBackoffAfterMs = 500;
+    static constexpr Uint32 kIdleBackoffDelayMs = 4;
 
     while (alive()) {
         // gotAny 語義（Round 1）：只有「本輪真的有轉發」才不讓步；只讀到雜訊
@@ -971,6 +976,7 @@ void ScHidPassthrough::readLoop(ScHidThreadCtx* ctx) {
             if (n <= 0) {
                 continue;  // 0 = no data (non-blocking); <0 = error on this handle
             }
+            lastRxTick = SDL_GetTicks();  // §REVIEW-1127 qt_stream #5
             if (handleInputReport(i, buf, n)) {
                 forwardedAny = true;
             }
@@ -980,11 +986,13 @@ void ScHidPassthrough::readLoop(ScHidThreadCtx* ctx) {
         // 期間實體 SC 的 input report 由 OS HIDClass ring buffer 暫存（SDL hidapi 開 handle
         // 時已 HidD_SetNumInputBuffers(64)，266 Hz × 100 ms ≈ 27 筆），不會掉資料。
         // 一輪只跑一筆，讓讀取與 feature 交錯；host driver 的 400 ms 閘控本來就把握手序列化。
+        bool ranFeature = false;  // §REVIEW-1127 qt_stream #5：這一輪有代跑 feature 請求就不放寬間隔
         {
             FeatureReq req;
             if (alive() && dequeueFeatureRequest(&req)) {
                 runFeatureRequest(req.reportId, req.op, req.seq, req.query, req.queryLen,
                                   req.budgetMs, req.tag);
+                ranFeature = true;
                 if (!alive()) return;
             }
         }
@@ -1030,7 +1038,10 @@ void ScHidPassthrough::readLoop(ScHidThreadCtx* ctx) {
         }
 
         if (!forwardedAny) {
-            SDL_Delay(1);  // nothing forwarded this sweep -- yield briefly
+            // §REVIEW-1127 qt_stream #5：超過 kIdleBackoffAfterMs 都沒讀到任何資料（控制器睡著）就睡 4 ms，
+            // 一讀到資料就回到 1 ms。只影響控制器醒來後的第一筆（最多晚幾毫秒）
+            const bool idle = !ranFeature && (now - lastRxTick) >= kIdleBackoffAfterMs;
+            SDL_Delay(idle ? kIdleBackoffDelayMs : 1);  // nothing forwarded this sweep -- yield briefly
         }
     }
 

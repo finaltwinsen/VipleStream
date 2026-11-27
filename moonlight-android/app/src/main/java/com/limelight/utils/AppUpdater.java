@@ -789,6 +789,14 @@ public class AppUpdater {
                 return;
             }
 
+            // §REVIEW-1127 android #1：dev 模式的 size 由測試伺服器自報，原本只在 size<=0 時才套上限，
+            // 自報很大的 size 就能讓手機無上限下載；dev 模式一律套 MAX_DEV_APK_BYTES。
+            if (isDevOverride && expectedSize > MAX_DEV_APK_BYTES) {
+                Log.e(TAG, LOG_PREFIX + "Dev asset size " + expectedSize + " exceeds limit " + MAX_DEV_APK_BYTES + "; refusing update.");
+                callback.onFailure("Dev asset size exceeds limit");
+                return;
+            }
+
             String expectedSha256 = digest.substring("sha256:".length()).trim();
             if (!expectedSha256.matches("[0-9a-fA-F]{64}")) {
                 Log.e(TAG, LOG_PREFIX + "Invalid sha256 digest format for " + targetAssetName + ": " + digest);

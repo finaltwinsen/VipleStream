@@ -66,6 +66,9 @@ public:
     int getOverlayMaxTextLength();
     void setOverlayTextUpdated(OverlayType type);
     void setOverlayState(OverlayType type, bool enabled);
+    // §REVIEW-1127 qt_stream #3：文字仍是 expected 才收掉（比對與收掉在同一把 slot 鎖裡）。
+    // 共用 slot 的倒數收掉用這個，避免收到別的功能剛寫進去的提示。回傳是否收掉。
+    bool hideOverlayIfText(OverlayType type, const char* expected);
     SDL_Color getOverlayColor(OverlayType type);
     int getOverlayFontSize(OverlayType type);
     SDL_Surface* getUpdatedOverlaySurface(OverlayType type);
@@ -73,7 +76,11 @@ public:
     void setOverlayRenderer(IOverlayRenderer* renderer);
 
 private:
-    void notifyOverlayUpdated(OverlayType type);
+    // §REVIEW-1127 qt_stream #3：原本的 notifyOverlayUpdated 拆成兩段：
+    // 在 slot 鎖裡畫 surface（*Locked），鎖外才通知 renderer（避免和 renderer 自己的鎖交叉卡死）。
+    bool buildOverlaySurfaceLocked(OverlayType type);
+    bool setOverlayStateLocked(OverlayType type, bool enabled);
+    void notifyRenderer(OverlayType type);
 
     struct {
         bool enabled;
@@ -84,6 +91,12 @@ private:
         TTF_Font* font;
         SDL_Surface* surface;
     } m_Overlays[OverlayMax];
+    // §REVIEW-1127 qt_stream #3：每個 slot 一把鎖（SDL_mutex 可重入），涵蓋寫文字、切換狀態與重畫 surface。
+    // 同一個 slot 會被主、解碼、呈現執行緒同時寫；同一個 TTF_Font 不能兩條執行緒同時用。
+    // 不共用一把：解碼執行緒每秒畫一次 debug HUD 要幾毫秒，不能擋住其他 slot。
+    SDL_mutex* m_SlotLock[OverlayMax];
+    // §REVIEW-1127 qt_stream #3：TTF_OpenFontRW 會動到共用的 FreeType library，兩個 slot 同時第一次開字型時要排隊
+    SDL_mutex* m_FontOpenLock;
     IOverlayRenderer* m_Renderer;
     MappedFile m_MappedFont;        // primary: mmap'd system CJK font.
     QByteArray m_FallbackFont;      // fallback: embedded ModeSeven.ttf.

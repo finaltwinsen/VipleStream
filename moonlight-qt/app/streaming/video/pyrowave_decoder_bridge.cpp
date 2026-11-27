@@ -237,6 +237,13 @@ int PyroWaveDecoderBridge::submitDecodeUnit(PDECODE_UNIT du, AVFrame* outFrame)
     // 被截斷：push 會在那裡失敗，但前面已解析的區塊會留著，缺的區塊解碼時補 0。
     const bool isPartial = (du->flags & DU_FLAG_PARTIAL_FRAME) != 0;
 
+    // §REVIEW-1127 qt_stream #1：fullLength 是有號 int，負值轉 size_t 會變超大值、reserve 丟 length_error 讓整個程式結束。
+    // 上限與 ffmpeg.cpp 的 kMaxPacketBufferBytes 相同（64 MB）。intra 幀，丟掉就好，不要 IDR。
+    static constexpr int64_t kMaxFrameBytes = 64ll * 1024 * 1024;
+    if (du->fullLength < 0 || (int64_t)du->fullLength > kMaxFrameBytes) {
+        return DR_OK;
+    }
+
     m_FrameBuffer.clear();
     m_FrameBuffer.reserve((size_t)du->fullLength);
     for (PLENTRY entry = du->bufferList; entry != nullptr; entry = entry->next) {
@@ -252,9 +259,15 @@ int PyroWaveDecoderBridge::submitDecodeUnit(PDECODE_UNIT du, AVFrame* outFrame)
     pyrowave_result pushRes = pyrowave_decoder_push_packet(m_Decoder, m_FrameBuffer.data(), m_FrameBuffer.size());
     if (pushRes != PYROWAVE_SUCCESS && !isPartial) {
         static std::atomic<int> s_DiagCount{0};
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "[PyroWave] push_packet failed on frame %d (len=%zu, err=%d)",
-                    du->frameNumber, m_FrameBuffer.size(), (int)pushRes);
+        // §REVIEW-1127 qt_stream #10：原本每次失敗都印一行（位元流壞掉時就是每幀一行）。比照下面 s_NotReadyCount：
+        // 前 5 次加之後每 300 次印一次，附累計次數
+        static std::atomic<int> s_PushFailCount{0};
+        const int pushFailN = s_PushFailCount.fetch_add(1);
+        if (pushFailN < 5 || (pushFailN % 300) == 0) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "[PyroWave] push_packet failed on frame %d (len=%zu, err=%d; total %d)",
+                        du->frameNumber, m_FrameBuffer.size(), (int)pushRes, pushFailN + 1);
+        }
         if (s_DiagCount.fetch_add(1) < 8) {
             logPushPacketFailure(du, 0, 1, m_FrameBuffer.data(), m_FrameBuffer.size(),
                                  m_Width, m_Height, (m_VideoFormat & VIDEO_FORMAT_MASK_YUV444) != 0);

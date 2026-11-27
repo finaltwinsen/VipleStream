@@ -454,8 +454,9 @@ QString redactSecrets(const QString& text, const QStringList& extraSecrets)
     QStringList secrets;
     secrets.reserve(extraSecrets.size());
     for (const QString& secret : extraSecrets) {
-        // §LOGDROP：短於 3 的字會把內文打散，不遮。
-        if (secret.size() >= 3) {
+        // §LOGDROP：空字串不遮。§REVIEW-1127 qt_ui #13：原本短於 3 的整個略過，1～2 字元的電腦名稱、使用者名稱
+        // 會原樣上傳；現在照收，但只在整詞（前後不是字母或數字）時才遮，不會把內文打散（見下面）
+        if (!secret.isEmpty()) {
             secrets.append(secret);
         }
     }
@@ -478,7 +479,14 @@ QString redactSecrets(const QString& text, const QStringList& extraSecrets)
                 break;
             }
             const int end = idx + secret.size();
-            if (!rangeTaken(taken, idx, end)) {
+            // §REVIEW-1127 qt_ui #13：1～2 字元的只遮整詞（例如名稱 "pc" 不遮 "pcm" 或 "upc" 裡的 "pc"）
+            const bool shortSecret = secret.size() < 3;
+            const bool wordBounded = (idx == 0 || !text.at(idx - 1).isLetterOrNumber()) &&
+                                     (end >= n || !text.at(end).isLetterOrNumber());
+            if (shortSecret && !wordBounded) {
+                from = idx + 1;
+            }
+            else if (!rangeTaken(taken, idx, end)) {
                 for (int k = idx; k < end; ++k) {
                     taken[static_cast<size_t>(k)] = 1;
                 }
@@ -510,6 +518,28 @@ QString redactSecrets(const QString& text, const QStringList& extraSecrets)
     return out;
 }
 
+// §REVIEW-1127 qt_ui #13：使用者設定檔目錄的名稱（C:/Users/<名稱>、/home/<名稱>，斜線兩種都認）。Windows 的
+// USERNAME 跟目錄名稱不一定一樣（改過帳號名稱、Microsoft 帳號自動產生的目錄名），名稱比對遮不到，這裡依路徑位置遮。
+// 已經是 <redacted> 的（開頭是 '<'）不會再配到。可能會多遮一點（例如網址裡的 /home/），不影響功能
+QString redactHomeDirNames(const QString& text)
+{
+    static const QRegularExpression homeDir(
+            QStringLiteral("([\\\\/](?:Users|home)[\\\\/])([^\\\\/\\s\"'<>:|*?]+)"),
+            QRegularExpression::CaseInsensitiveOption);
+    QString out;
+    out.reserve(text.size());
+    int cursor = 0;
+    QRegularExpressionMatchIterator it = homeDir.globalMatch(text);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch match = it.next();
+        out.append(text.mid(cursor, match.capturedStart(2) - cursor));
+        out.append(QStringLiteral("<redacted>"));
+        cursor = match.capturedEnd(2);
+    }
+    out.append(text.mid(cursor));
+    return out;
+}
+
 } // namespace
 
 QString LogRedactor::redact(const QString& text, const QStringList& extraSecrets)
@@ -519,6 +549,7 @@ QString LogRedactor::redact(const QString& text, const QStringList& extraSecrets
     }
     // §LOGDROP：名稱先遮。電腦名稱若剛好是一組公開 IP，要整段換成 <redacted>。
     QString masked = redactSecrets(text, extraSecrets);
+    masked = redactHomeDirNames(masked);  // §REVIEW-1127 qt_ui #13
     masked = redactStructured(masked);
     return redactEmails(masked);
 }

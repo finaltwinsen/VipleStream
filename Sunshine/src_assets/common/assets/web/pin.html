@@ -80,6 +80,13 @@
               document.querySelector(
                 "#status"
               ).innerHTML = `<div class="alert alert-danger" role="alert">${this.i18n.t('pin.pair_failure')}</div>`;
+              // §REVIEW-1127 web_sec N1：server 回了具體原因（例如同時有多筆配對在等 PIN）就附在後面；用 textContent 避免插入 HTML
+              if (typeof response.error === "string" && response.error) {
+                const detail = document.createElement("div");
+                detail.className = "small mt-1";
+                detail.textContent = response.error;
+                document.querySelector("#status .alert").appendChild(detail);
+              }
             }
           });
       }

@@ -321,7 +321,6 @@ namespace vrdrv {
     int64_t mapped_qpc = 0;
     bool server_stale = false;
     bool textures_done = false;
-    bool header_bad_logged = false;
 
     session_t() {
       rov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -1393,11 +1392,9 @@ namespace vrdrv {
         // server heartbeat（§B.6 OPERATIONAL：> 1 s 只進 standby、不斷線）
         vripc_shm_header_t hdr {};
         s.gen->read_header(hdr);
+        // §REVIEW-1127 vr #11：protocol_error 一定斷線，原本的 header_bad_logged 旗標用不到（看起來像能容忍重複錯誤），刪掉
         if (hdr.magic != VRIPC_MAGIC_SHM || hdr.generation != s.gen->id()) {
-          if (!s.header_bad_logged) {
-            s.header_bad_logged = true;
-            return protocol_error("shm-header-changed");
-          }
+          return protocol_error("shm-header-changed");
         }
         const int64_t ref = hdr.server_heartbeat_qpc > s.mapped_qpc ? hdr.server_heartbeat_qpc : s.mapped_qpc;
         const bool stale = (t - ref) > ms_to_qpc(qpf_, proto::k_server_stale_ms);

@@ -323,6 +323,9 @@ private:
     static
     void clConnectionStatusUpdate(int connectionStatus);
 
+    // §REVIEW-1127 qt_stream #3：主執行緒處理 clConnectionStatusUpdate 推來的 overlay 更新
+    void handleConnectionStatusOverlay(int connectionStatus);
+
     static
     void clSetHdrMode(bool enabled);
 

@@ -195,6 +195,11 @@ bool decode(const uint8_t* data, size_t len, Frame& out, std::string* why)
             out.vy[i] = static_cast<int16_t>(accY);
             if (hasDepth) {
                 accD = static_cast<uint8_t>(accD + pDepth[i]);
+                // §REVIEW-1127 qt_xr #11：合法 server 的量化上限是 (1 << kDepthBits) - 1 = 63；uint8 累加繞回會超過，
+                // 整幀拒收（out 是呼叫端的新 Frame，失敗時會被丟掉）
+                if (accD > ((1u << kDepthBits) - 1u)) {
+                    return fail("depth");
+                }
                 out.depth[i] = accD;
             }
         }

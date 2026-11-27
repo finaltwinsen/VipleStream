@@ -68,6 +68,23 @@ uint64_t nowUs()
                                      std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
+// §REVIEW-1127 qt_xr #12：持續失敗的 log 節流。第一次照印，之後最多每 10 秒印一次並附累計次數。
+// 每個呼叫點一份（static），只在 render thread 用。
+struct ThrottledFailLog {
+    uint64_t total = 0;
+    uint64_t lastLogUs = 0;
+};
+bool throttledFailShouldLog(ThrottledFailLog& t)
+{
+    t.total++;
+    const uint64_t now = nowUs();
+    if (t.total == 1 || now - t.lastLogUs >= 10000000ull) {
+        t.lastLogUs = now;
+        return true;
+    }
+    return false;
+}
+
 // §VR-GAME-MV（M-MV2）：採用外部遊戲 MV 之前要連續幾張都有（§8.3 的穩定期，借鑑 UEVR-AFW）。
 // 中斷、RESET、網格或 frameStep 改變之後重新起算；之前一律走原本的 synthFlow。
 constexpr uint32_t kExtMvWarmup = 30;
@@ -1287,7 +1304,11 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs, bool immersive)
             rendered = pl_render_image(m_Renderer, &mapped, &t1, &m_RenderParams);
         }
         if (!rendered) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] pl_render_image failed");
+            static ThrottledFailLog s_RenderFail;  // §REVIEW-1127 qt_xr #12：原本每幀一行
+            if (throttledFailShouldLog(s_RenderFail)) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] pl_render_image failed (total %llu)",
+                             (unsigned long long)s_RenderFail.total);
+            }
         }
     }
 
@@ -2021,10 +2042,15 @@ float czero = vs_cost(vs_prev, uv, g, px, xmin, xmax);
 float best = czero;
 vec2 bd = vec2(0.0);
 vec2 init = vec2(0.0);
-if (vs_p.y > 0.5) {
+// §REVIEW-1127 qt_xr #3：靜止區提前結束。下面的採用條件是 czero - best > 0.4*czero + 0.08，即 best < 0.6*czero - 0.08；
+// best ≥ 0（成本是絕對值的和加上非負的距離項），所以 czero ≤ 0.08/0.6 ≈ 0.1333 時永遠不成立、r 一定是 0。
+// 門檻取 0.13（比 0.1333 留 0.002 的餘裕，就算驅動用較低精度算也不會誤判），這時不必搜尋。
+// 輸出的 .xy（位移）完全不變；只有 .z（best）在提前結束時是 czero 而不是搜尋到的最小值，.z 只有 dev 的 flow.bin dump 會讀。
+bool vs_search = czero > 0.13;
+if (vs_search && vs_p.y > 0.5) {
     init = texture(vs_init, uv).xy * sz;  // 粗的一層給的剩餘位移（UV）換成這一層的格數
 }
-int rad = int(vs_p.x + 0.5);
+int rad = vs_search ? int(vs_p.x + 0.5) : -1;  // -1：下面的迴圈一次都不跑
 for (int dy = -rad; dy <= rad; dy++) {
     for (int dx = -rad; dx <= rad; dx++) {
         vec2 d = init + vec2(float(dx), float(dy));
@@ -2033,7 +2059,7 @@ for (int dy = -rad; dy <= rad; dy++) {
     }
 }
 vec2 r = vec2(0.0);
-if (czero - best > 0.4 * czero + 0.08) {
+if (vs_search && czero - best > 0.4 * czero + 0.08) {
     float cxm = vs_cost(vs_prev, uv, g + bd + vec2(-1.0, 0.0), px, xmin, xmax);
     float cxp = vs_cost(vs_prev, uv, g + bd + vec2(1.0, 0.0), px, xmin, xmax);
     float cym = vs_cost(vs_prev, uv, g + bd + vec2(0.0, -1.0), px, xmin, xmax);
@@ -4417,7 +4443,11 @@ bool XrVideo::renderEquiFrame(AVFrame* frame, uint64_t t0)
         target.color = pl_color_space_srgb;
         ok = pl_render_image(m_Renderer, &mapped, &target, &m_RenderParams);
         if (!ok) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] equirect: pl_render_image failed");
+            static ThrottledFailLog s_EquiRenderFail;  // §REVIEW-1127 qt_xr #12：原本每幀一行
+            if (throttledFailShouldLog(s_EquiRenderFail)) {
+                SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-XR] equirect: pl_render_image failed (total %llu)",
+                             (unsigned long long)s_EquiRenderFail.total);
+            }
         }
     }
     const uint64_t tCpu = nowUs();

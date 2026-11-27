@@ -366,6 +366,11 @@ OverlayManager::OverlayManager() :
     m_Renderer(nullptr)
 {
     memset(m_Overlays, 0, sizeof(m_Overlays));
+    // §REVIEW-1127 qt_stream #3：每個 slot 的鎖，要在下面任何提早 return 之前建好
+    for (int i = 0; i < OverlayType::OverlayMax; i++) {
+        m_SlotLock[i] = SDL_CreateMutex();
+    }
+    m_FontOpenLock = SDL_CreateMutex();
 
     if (!tryMapCJKFont(m_MappedFont)) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -418,6 +423,12 @@ OverlayManager::~OverlayManager()
         if (m_Overlays[i].font != nullptr) {
             TTF_CloseFont(m_Overlays[i].font);
         }
+        if (m_SlotLock[i] != nullptr) {
+            SDL_DestroyMutex(m_SlotLock[i]);  // §REVIEW-1127 qt_stream #3
+        }
+    }
+    if (m_FontOpenLock != nullptr) {
+        SDL_DestroyMutex(m_FontOpenLock);  // §REVIEW-1127 qt_stream #3
     }
 
     TTF_Quit();
@@ -439,12 +450,32 @@ char* OverlayManager::getOverlayText(OverlayType type)
     return m_Overlays[type].text;
 }
 
+namespace {
+// §REVIEW-1127 qt_stream #3：slot 鎖的 RAII（SDL_mutex 可重入；nullptr 時 SDL_LockMutex 只回錯誤）
+struct SlotLockGuard {
+    explicit SlotLockGuard(SDL_mutex* m) : m_Mutex(m) { SDL_LockMutex(m_Mutex); }
+    ~SlotLockGuard() { SDL_UnlockMutex(m_Mutex); }
+    SlotLockGuard(const SlotLockGuard&) = delete;
+    SlotLockGuard& operator=(const SlotLockGuard&) = delete;
+    SDL_mutex* m_Mutex;
+};
+}
+
 void OverlayManager::updateOverlayText(OverlayType type, const char* text)
 {
-    strncpy(m_Overlays[type].text, text, sizeof(m_Overlays[0].text));
-    m_Overlays[type].text[getOverlayMaxTextLength() - 1] = '\0';
+    bool notify;
+    {
+        SlotLockGuard lg(m_SlotLock[type]);  // §REVIEW-1127 qt_stream #3
+        strncpy(m_Overlays[type].text, text, sizeof(m_Overlays[0].text));
+        m_Overlays[type].text[getOverlayMaxTextLength() - 1] = '\0';
 
-    setOverlayTextUpdated(type);
+        // Only update the overlay state if it's enabled. If it's not enabled,
+        // the renderer has already been notified by setOverlayState().
+        notify = m_Overlays[type].enabled && buildOverlaySurfaceLocked(type);
+    }
+    if (notify) {
+        notifyRenderer(type);
+    }
 }
 
 int OverlayManager::getOverlayMaxTextLength()
@@ -466,14 +497,31 @@ SDL_Surface* OverlayManager::getUpdatedOverlaySurface(OverlayType type)
 
 void OverlayManager::setOverlayTextUpdated(OverlayType type)
 {
-    // Only update the overlay state if it's enabled. If it's not enabled,
-    // the renderer has already been notified by setOverlayState().
-    if (m_Overlays[type].enabled) {
-        notifyOverlayUpdated(type);
+    bool notify;
+    {
+        SlotLockGuard lg(m_SlotLock[type]);  // §REVIEW-1127 qt_stream #3
+        // Only update the overlay state if it's enabled. If it's not enabled,
+        // the renderer has already been notified by setOverlayState().
+        notify = m_Overlays[type].enabled && buildOverlaySurfaceLocked(type);
+    }
+    if (notify) {
+        notifyRenderer(type);
     }
 }
 
 void OverlayManager::setOverlayState(OverlayType type, bool enabled)
+{
+    bool notify;
+    {
+        SlotLockGuard lg(m_SlotLock[type]);  // §REVIEW-1127 qt_stream #3
+        notify = setOverlayStateLocked(type, enabled);
+    }
+    if (notify) {
+        notifyRenderer(type);
+    }
+}
+
+bool OverlayManager::setOverlayStateLocked(OverlayType type, bool enabled)
 {
     bool stateChanged = m_Overlays[type].enabled != enabled;
 
@@ -485,8 +533,27 @@ void OverlayManager::setOverlayState(OverlayType type, bool enabled)
             m_Overlays[type].text[0] = 0;
         }
 
-        notifyOverlayUpdated(type);
+        return buildOverlaySurfaceLocked(type);
     }
+    return false;
+}
+
+bool OverlayManager::hideOverlayIfText(OverlayType type, const char* expected)
+{
+    // §REVIEW-1127 qt_stream #3：比對與收掉在同一把鎖裡，中間不會被別的寫入者插進來
+    bool hidden = false;
+    bool notify = false;
+    {
+        SlotLockGuard lg(m_SlotLock[type]);
+        if (expected != nullptr && strcmp(m_Overlays[type].text, expected) == 0) {
+            hidden = true;
+            notify = setOverlayStateLocked(type, false);
+        }
+    }
+    if (notify) {
+        notifyRenderer(type);
+    }
+    return hidden;
 }
 
 SDL_Color OverlayManager::getOverlayColor(OverlayType type)
@@ -499,14 +566,28 @@ void OverlayManager::setOverlayRenderer(IOverlayRenderer* renderer)
     m_Renderer = renderer;
 }
 
-void OverlayManager::notifyOverlayUpdated(OverlayType type)
+void OverlayManager::notifyRenderer(OverlayType type)
 {
+    // §REVIEW-1127 qt_stream #3：在 slot 鎖外面通知 renderer。d3d11va 的 renderFrame 是先拿 m_RenderLock 再寫 overlay，
+    // 它的 notifyOverlayUpdated 又會拿 m_RenderLock；鎖裡通知的話，主執行緒（slot 鎖→render 鎖）和繪製執行緒
+    // （render 鎖→slot 鎖）會互相卡死。renderer 只用 getUpdatedOverlaySurface 的原子交換拿 surface，不需要 slot 鎖。
+    IOverlayRenderer* renderer = m_Renderer;
+    if (renderer != nullptr) {
+        renderer->notifyOverlayUpdated(type);
+    }
+}
+
+bool OverlayManager::buildOverlaySurfaceLocked(OverlayType type)
+{
+    // §REVIEW-1127 qt_stream #3：呼叫端持有這個 slot 的鎖。回傳 true＝已換上新的 surface，呼叫端要在鎖外通知 renderer。
     if (m_Renderer == nullptr) {
-        return;
+        return false;
     }
 
     // Construct the required font to render the overlay
     if (m_Overlays[type].font == nullptr) {
+        // §REVIEW-1127 qt_stream #3：開字型會動到共用的 FreeType library（順序固定：slot 鎖→字型鎖）
+        SlotLockGuard fontLg(m_FontOpenLock);
         // Prefer the mmap'd system CJK font; fall back to the embedded
         // ModeSeven.ttf QByteArray when no system font was found.
         const char* fontPtr = nullptr;
@@ -521,7 +602,7 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
         if (fontPtr == nullptr || fontSize <= 0) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "SDL overlay font failed to load");
-            return;
+            return false;
         }
 
         // Backing storage (mmap region or QByteArray) outlives OverlayManager,
@@ -535,7 +616,7 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
                         TTF_GetError());
 
             // Can't proceed without a font
-            return;
+            return false;
         }
     }
 
@@ -561,11 +642,10 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
     SDL_Surface* oldSurface = (SDL_Surface*)SDL_AtomicSetPtr(
         (void**)&m_Overlays[type].surface, newSurface);
 
-    // Notify the renderer
-    m_Renderer->notifyOverlayUpdated(type);
-
-    // Free the old surface
+    // Free the old surface. §REVIEW-1127 qt_stream #3：還留在 slot 裡的就是 renderer 沒拿走的，
+    // renderer 拿走時會用原子交換把 slot 清成 nullptr，所以這裡先釋放不會碰到 renderer 正在用的那張。
     if (oldSurface != nullptr) {
         SDL_FreeSurface(oldSurface);
     }
+    return true;
 }

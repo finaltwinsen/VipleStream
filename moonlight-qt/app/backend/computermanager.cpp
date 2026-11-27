@@ -335,7 +335,24 @@ private:
             if (!online) {
                 auto prefs = StreamingPreferences::get(nullptr);
                 if (prefs && !prefs->relayUrl.isEmpty() && !m_Computer->uuid.isEmpty()) {
-                    auto result = RelayLookup::lookup(prefs->relayUrl, prefs->relayPsk, m_Computer->uuid, 5000);
+                    // §REVIEW-1127 qt_ui #4：relay lookup 的結果快取（成功 30 秒、失敗 15 秒）。原本每一輪（上線或開了 autoWake 時
+                    // 每 3 秒）都開一條 relay TLS＋WS 連線。relay 設定改了、或使用者明確喚醒時重新查
+                    const qint64 relayNowMs = QDateTime::currentMSecsSinceEpoch();
+                    const QString relayKey = prefs->relayUrl + QLatin1Char('|') + prefs->relayPsk;
+                    const bool relayCacheValid = m_RelayLookupAtMs != 0 && m_RelayLookupKey == relayKey &&
+                            relayNowMs - m_RelayLookupAtMs < (m_RelayLookupCache.success ? kRelayLookupCacheOkMs
+                                                                                          : kRelayLookupCacheFailMs);
+                    RelayLookup::Result result;
+                    if (relayCacheValid) {
+                        result = m_RelayLookupCache;
+                    }
+                    else {
+                        result = RelayLookup::lookup(prefs->relayUrl, prefs->relayPsk, m_Computer->uuid, 5000);
+                        m_RelayLookupCache = result;
+                        m_RelayLookupAtMs = relayNowMs;
+                        m_RelayLookupKey = relayKey;
+                        m_RelayProxyOkAtMs = 0;  // 位址可能變了，下一次 proxy 照常打
+                    }
                     if (result.success) {
                         NvAddress relayAddr;
                         QString stunNatToStore;
@@ -428,6 +445,12 @@ private:
                             qInfo() << "[VIPLE-NAT]" << m_Computer->name
                                     << "is now ONLINE via relay (direct poll)!";
                             online = true;
+                        } else if (m_RelayProxyOkAtMs != 0 && relayNowMs - m_RelayProxyOkAtMs < kRelayProxyIntervalMs &&
+                                   wasOnline && relayOnlyNow()) {
+                            // §REVIEW-1127 qt_ui #4：只能走 relay 時，/serverinfo proxy 改成 kRelayProxyIntervalMs 一次（原本每 3 秒一條
+                            // TLS＋WS、host 也每 3 秒被打一次）；中間的輪次沿用上一次的狀態。主機離線最多晚這麼久才發現
+                            online = true;
+                            relayOnly = true;
                         } else {
                             // TCP unreachable or no STUN — try polling via relay HTTP proxy
                             qInfo() << "[VIPLE-NAT] Using relay HTTP proxy for" << m_Computer->name;
@@ -489,6 +512,7 @@ private:
                                                 << ", apps:" << m_Computer->appList.size() << ")";
                                         online = true;
                                         relayOnly = true;
+                                        m_RelayProxyOkAtMs = relayNowMs;  // §REVIEW-1127 qt_ui #4
                                     }
                                 } catch (...) {
                                     // §REVIEW-1111（第二輪）：relay 回的內容解析不了＝沒有拿到任何 serverinfo。
@@ -599,6 +623,11 @@ private:
                         wokenByCv = true;
                     }
                 }
+                if (wokenByCv) {
+                    // §REVIEW-1127 qt_ui #4：明確喚醒（或其他要求立刻重輪詢）時不用 relay 的快取，馬上重查
+                    m_RelayLookupAtMs = 0;
+                    m_RelayProxyOkAtMs = 0;
+                }
             }
         }
     }
@@ -612,6 +641,19 @@ private:
     ComputerManager* m_Manager;          // §VR-LAUNCHER：app 清單模式與世代號
     std::atomic<bool> m_AppListRefresh {false};
     qint64 m_LanProbeAtMs = 0;           // §LAN-PREF：上次探區網位址的時間（只在輪詢執行緒存取）
+    // §REVIEW-1127 qt_ui #4：relay lookup 的快取與 relay-only 時 /serverinfo proxy 的間隔（只在輪詢執行緒存取）
+    static constexpr qint64 kRelayLookupCacheOkMs = 30000;
+    static constexpr qint64 kRelayLookupCacheFailMs = 15000;
+    static constexpr qint64 kRelayProxyIntervalMs = 12000;
+    qint64 m_RelayLookupAtMs = 0;        // 0＝沒有快取
+    QString m_RelayLookupKey;            // relayUrl＋PSK；設定改了快取就作廢
+    RelayLookup::Result m_RelayLookupCache;
+    qint64 m_RelayProxyOkAtMs = 0;       // 上次 proxy /serverinfo 成功的時刻（0＝沒有／要重打）
+    bool relayOnlyNow()
+    {
+        QReadLocker computerLock(&m_Computer->lock);
+        return m_Computer->state == NvComputer::CS_ONLINE && m_Computer->onlineViaRelay;
+    }
     qint64 m_ExplicitWakeUntil;          // wallclock ms; protected by m_WakeMutex
     QMutex m_WakeMutex;
     QWaitCondition m_WakeCondition;

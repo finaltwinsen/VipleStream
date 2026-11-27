@@ -390,7 +390,8 @@ namespace vrdrv {
       L.pred_s = perEye[0].flHmdPosePredictionTimeInSecondsFromNow;
       L.submit_qpc = now;
       index_for_timing = layer_count_;
-      pred_us = std::isfinite(L.pred_s) ? (int64_t) (L.pred_s * 1e6) : 0;
+      // §REVIEW-1127 vr #8：超出 int64 範圍的 float→int 轉換是 UB，先夾住（正常值在幾十 ms 內，不受影響）
+      pred_us = std::isfinite(L.pred_s) ? (int64_t) (std::clamp(L.pred_s, -1.0f, 1.0f) * 1e6) : 0;
       ++layer_count_;
     });
     unlock();
@@ -622,7 +623,8 @@ namespace vrdrv {
 
     int64_t t_target_qpc = present_qpc;
     if (layer_count_ > 0) {
-      const float pred = std::isfinite(layers_[0].pred_s) ? layers_[0].pred_s : 0.0f;
+      // §REVIEW-1127 vr #8：先夾住再轉 int64，避免轉換與 submit_qpc 相加的有號溢位（UB）
+      const float pred = std::isfinite(layers_[0].pred_s) ? std::clamp(layers_[0].pred_s, 0.0f, 0.5f) : 0.0f;
       t_target_qpc = layers_[0].submit_qpc + (int64_t) ((double) pred * (double) ctx_.qpf);
     }
 
@@ -1090,7 +1092,10 @@ namespace vrdrv {
         push_timing(ctx_, VRIPC_TE_PHASE_SNAP, (uint32_t) frame_id_, r.snap_ticks * 1000000000 / ctx_.qpf, 0);
       }
       if (r.mode == VRIPC_PM_PRODUCTION || r.mode == VRIPC_PM_E3_BOTH) {
-        slept = vsync_.wait_until(timer_, r.target_qpc);
+        // §REVIEW-1127 vr #1：沒有 generation 或 generation 閒置（SteamVR 開著但沒在串流）時不忙等，
+        // 串流中保留 300 µs 的忙等吸收 timer 晚醒（拿掉會傷節拍）
+        const bool streaming = gen && !gen->idle();
+        slept = vsync_.wait_until(timer_, r.target_qpc, streaming);
       }
     });
     push_timing(ctx_, VRIPC_TE_POSTPRESENT_EXIT, (uint32_t) frame_id_, slept, 0);

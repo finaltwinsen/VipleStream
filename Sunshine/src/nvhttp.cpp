@@ -180,7 +180,18 @@ namespace nvhttp {
   std::recursive_mutex map_id_sess_mtx;
   constexpr std::size_t k_pair_sessions_max = 8;
   constexpr auto k_pair_session_ttl = std::chrono::seconds(180);
+  // §REVIEW-1127 web_sec #1：每個來源 IP 最多幾筆待配對。超過時淘汰「同一個 IP」最舊的那筆，
+  // 不淘汰別人的（全域淘汰最舊會讓攻擊者一直送新請求把合法使用者那筆擠掉）。
+  constexpr std::size_t k_pair_sessions_per_ip_max = 2;
   client_t client_root;
+
+  /// §REVIEW-1127 web_sec #1(c)：TTL 清理抽成函式，getservercert 與 pin() 都呼叫（呼叫端持有 map_id_sess_mtx）。
+  void prune_expired_pair_sessions() {
+    const auto now = std::chrono::steady_clock::now();
+    for (auto i = map_id_sess.begin(); i != map_id_sess.end();) {
+      i = now - i->second.created > k_pair_session_ttl ? map_id_sess.erase(i) : std::next(i);
+    }
+  }
   // §REVIEW-1103：client_root 與 cert_chain 會被 confighttp 執行緒（unpair／enable／admin）
   // 改動，同時 nvhttp HTTPS 執行緒在握手驗證時遍歷 → 一把鎖保護兩者。用 recursive_mutex，
   // 因為 unpair_client → save_state／load_state、add_authorized_client → save_state 會重入。
@@ -695,6 +706,11 @@ namespace nvhttp {
     BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
 
     for (auto &[name, val] : request->header) {
+      // §REVIEW-1127 web_sec #17：跟 confighttp 共用遮罩清單（Authorization、Cookie、relay token…）
+      if (http::is_sensitive_header(name)) {
+        BOOST_LOG(debug) << name << " -- CREDENTIALS REDACTED"sv;
+        continue;
+      }
       BOOST_LOG(debug) << name << " -- " << val;
     }
 
@@ -758,6 +774,19 @@ namespace nvhttp {
 
     auto uniqID {get_arg(args, "uniqueid")};
 
+    // §REVIEW-1127 web_sec #16：uniqueid 來自未認證的 query string（%0A 會解成換行），原樣寫進 [PAIR-PHASE] log
+    // 就能偽造 log 行。只擋長度與控制字元，不限十六進位，避免擋到格式特別的第三方 client。
+    if (uniqID.empty() || uniqID.size() > 64 ||
+        std::any_of(uniqID.begin(), uniqID.end(), [](char c) {
+          const auto u = static_cast<unsigned char>(c);
+          return u < 0x20 || u == 0x7f;
+        })) {
+      BOOST_LOG(warning) << "[PAIR-FAIL] rejecting malformed uniqueid (len="sv << uniqID.size() << ')';
+      tree.put("root.<xmlattr>.status_code", 400);
+      tree.put("root.<xmlattr>.status_message", "Invalid uniqueid parameter");
+      return;
+    }
+
     args_t::const_iterator it;
     if (it = args.find("phrase"); it != std::end(args)) {
       if (it->second == "getservercert"sv) {
@@ -770,13 +799,32 @@ namespace nvhttp {
         // §REVIEW-1111：先把參數都取完再放進 map（原本 salt 缺了會在 emplace 之後丟例外，留下半筆）
         auto salt = get_arg(args, "salt");
         // 過期的清掉（等 PIN 等了三分鐘以上：使用者早就放棄了；連線跟著關閉）
-        const auto now = std::chrono::steady_clock::now();
-        for (auto i = map_id_sess.begin(); i != map_id_sess.end();) {
-          i = now - i->second.created > k_pair_session_ttl ? map_id_sess.erase(i) : std::next(i);
-        }
+        prune_expired_pair_sessions();
         // 同一個 uniqueid 重新開始配對：以新的為準（Moonlight 系的 client 都用同一個固定的 uniqueid；原本 emplace
         // 不會換掉舊的憑證，卻會蓋掉 salt 與等待中的 response，新舊混在一起）
         map_id_sess.erase(sess.client.uniqueID);
+        // §REVIEW-1127 web_sec #1：每個來源 IP 的上限。同一個 IP 已經有 k_pair_sessions_per_ip_max 筆時，
+        // 淘汰這個 IP 自己最舊的那筆（只動自己的，不會擠掉別台裝置的配對）。
+        sess.remote_addr = net::addr_to_normalized_string(request->remote_endpoint().address());
+        for (;;) {
+          std::size_t same_ip = 0;
+          auto oldest = std::end(map_id_sess);
+          for (auto i = map_id_sess.begin(); i != map_id_sess.end(); ++i) {
+            if (i->second.remote_addr != sess.remote_addr) {
+              continue;
+            }
+            ++same_ip;
+            if (oldest == std::end(map_id_sess) || i->second.created < oldest->second.created) {
+              oldest = i;
+            }
+          }
+          if (same_ip < k_pair_sessions_per_ip_max || oldest == std::end(map_id_sess)) {
+            break;
+          }
+          BOOST_LOG(warning) << "[PAIR-FAIL] ["sv << sess.remote_addr << "] too many pending pairings from this address ("sv << same_ip
+                             << ") - dropping its oldest one"sv;
+          map_id_sess.erase(oldest);  // 等著的 response 隨之釋放、連線關閉
+        }
         if (map_id_sess.size() >= k_pair_sessions_max) {
           BOOST_LOG(warning) << "[PAIR-FAIL] too many pairing attempts in progress ("sv << map_id_sess.size() << ") - rejecting a new one"sv;
           tree.put("root.paired", 0);
@@ -834,7 +882,12 @@ namespace nvhttp {
     }
   }
 
-  bool pin(std::string pin, std::string name) {
+  bool pin(std::string pin, std::string name, std::string *error) {
+    auto set_error = [error](std::string msg) {
+      if (error) {
+        *error = std::move(msg);
+      }
+    };
     // VipleStream §pair-diag — pin() 是 Web UI 端送 PIN 進來的觸發點。
     // 印 entry log 能確認「PIN 確實有送到 server」，再對齊 client side
     // 的 getservercert request 看是不是同一個 session 起飛了。
@@ -843,14 +896,17 @@ namespace nvhttp {
                     << " pending_sessions="sv << map_id_sess.size();
     pt::ptree tree;
     std::lock_guard<std::recursive_mutex> pair_lk(map_id_sess_mtx);  // §REVIEW-1111
+    prune_expired_pair_sessions();  // §REVIEW-1127 web_sec #1(c)：過期的不能算進下面「幾筆在等 PIN」
     if (map_id_sess.empty()) {
       BOOST_LOG(warning) << "[PAIR-PIN] no pending session — client side didn't initiate getservercert yet"sv;
+      set_error("No pairing request is waiting for a PIN");
       return false;
     }
 
     // ensure pin is 4 digits
     if (pin.size() != 4) {
       BOOST_LOG(warning) << "[PAIR-PIN] reject: pin length="sv << pin.size() << " (must be 4)"sv;
+      set_error("PIN must be 4 digits");
       tree.put("root.paired", 0);
       tree.put("root.<xmlattr>.status_code", 400);
       tree.put(
@@ -863,6 +919,7 @@ namespace nvhttp {
     // ensure all pin characters are numeric
     if (!std::all_of(pin.begin(), pin.end(), ::isdigit)) {
       BOOST_LOG(warning) << "[PAIR-PIN] reject: pin contains non-digit chars"sv;
+      set_error("PIN must be numeric");
       tree.put("root.paired", 0);
       tree.put("root.<xmlattr>.status_code", 400);
       tree.put("root.<xmlattr>.status_message", "Pin must be numeric");
@@ -875,13 +932,38 @@ namespace nvhttp {
     // PIN 套到「最近一筆還在等 PIN 的配對」——使用者是看著剛跳出來的那一個在輸入；原本拿 map 的第一筆
     // （順序由雜湊決定），有人先塞了別的配對請求就會把 PIN 用在那一筆上。
     auto first = std::end(map_id_sess);
+    std::size_t waiting = 0;
     for (auto i = map_id_sess.begin(); i != map_id_sess.end(); ++i) {
-      if (i->second.last_phase == PAIR_PHASE::NONE && (first == std::end(map_id_sess) || i->second.created > first->second.created)) {
+      if (i->second.last_phase != PAIR_PHASE::NONE) {
+        continue;
+      }
+      ++waiting;
+      if (first == std::end(map_id_sess) || i->second.created > first->second.created) {
         first = i;
       }
     }
     if (first == std::end(map_id_sess)) {
       BOOST_LOG(warning) << "[PAIR-PIN] no session is waiting for a PIN"sv;
+      set_error("No pairing request is waiting for a PIN");
+      return false;
+    }
+    // §REVIEW-1127 web_sec N1：網頁看不出 PIN 會給哪一台。LAN 上的人只要一直保有一筆「最新」的待配對，
+    // 使用者輸入的 PIN 就會套到他那筆（第二次重輸同一個 PIN 時他已經能離線算出 PIN，配對成功）。
+    // 同時有兩筆以上在等 PIN 時一律不套用，讓使用者關掉其他裝置的配對畫面再試；正常情況同時只有一筆。
+    if (waiting > 1) {
+      std::string sources;
+      for (const auto &[uid, s] : map_id_sess) {
+        if (s.last_phase == PAIR_PHASE::NONE) {
+          sources += (sources.empty() ? ""s : ","s) + s.remote_addr;
+        }
+      }
+      BOOST_LOG(warning) << "[PAIR-PIN] reject: "sv << waiting << " pairing requests are waiting for a PIN (from "sv << sources
+                         << ") - refusing to guess which one"sv;
+      set_error(std::format(
+        "{} pairing requests are waiting for a PIN (from {}). Cancel pairing on the other devices, wait a few minutes if needed, and try again.",
+        waiting,
+        sources
+      ));
       return false;
     }
     const std::string unique_id = first->second.client.uniqueID;
@@ -3824,6 +3906,27 @@ namespace nvhttp {
     }
   }
 
+  /// §REVIEW-1127 web_sec #11：query string 裡的傳輸 token 寫進 info log 時只留前 8 碼。
+  std::string mask_xfer_token_query(const std::string &qs) {
+    std::string out = qs;
+    for (std::size_t pos = 0; (pos = out.find("token=", pos)) != std::string::npos;) {
+      if (pos > 0 && out[pos - 1] != '&' && out[pos - 1] != '?') {
+        pos += 6;
+        continue;
+      }
+      const std::size_t v = pos + 6;
+      std::size_t end = out.find('&', v);
+      if (end == std::string::npos) {
+        end = out.size();
+      }
+      if (end - v > 8) {
+        out.replace(v + 8, end - v - 8, "...");
+      }
+      pos = v;
+    }
+    return out;
+  }
+
   void xfer_blob_get(resp_https_t response, req_https_t request) {
     // §N.5.bug diagnostic (2026-05-14) — narrow: poll OK + 0% notification
     // 出現後 client 端 download failed: SSL library (45ms 後). Server 端
@@ -3833,7 +3936,7 @@ namespace nvhttp {
     void *ssl_ptr = request ? (void *)request->native_handle() : nullptr;
     BOOST_LOG(info) << "[VIPLE-XFER] blob_get ENTER ssl="sv << ssl_ptr
                     << " path="sv << (request ? request->path : std::string {})
-                    << " query="sv << (request ? request->query_string : std::string {});
+                    << " query="sv << (request ? mask_xfer_token_query(request->query_string) : std::string {});  // §REVIEW-1127 web_sec #11
     try {
       if (!xfer_gate_stream(response)) {
         BOOST_LOG(info) << "[VIPLE-XFER] blob_get EXIT gate_blocked ssl="sv << ssl_ptr;
@@ -3889,7 +3992,7 @@ namespace nvhttp {
     void *ssl_ptr = request ? (void *)request->native_handle() : nullptr;
     BOOST_LOG(info) << "[VIPLE-XFER] blob_post ENTER ssl="sv << ssl_ptr
                     << " path="sv << (request ? request->path : std::string {})
-                    << " query="sv << (request ? request->query_string : std::string {});
+                    << " query="sv << (request ? mask_xfer_token_query(request->query_string) : std::string {});  // §REVIEW-1127 web_sec #11
     try {
       if (!xfer_gate_stream(response)) {
         BOOST_LOG(info) << "[VIPLE-XFER] blob_post EXIT gate_blocked ssl="sv << ssl_ptr;
@@ -3919,6 +4022,19 @@ namespace nvhttp {
       std::vector<char> buf(k_chunk);
       std::uint64_t total = 0;
       std::uint64_t last_logged_mb = 0;
+      // §REVIEW-1127 web_sec #12：沒宣告大小（資料夾先壓 zip 再傳，事先不知道大小）時原本沒有上限。
+      // 改用目的地磁碟的剩餘空間減 1 GB 當上限；有宣告大小的照舊用宣告值。查不到剩餘空間就維持原本行為。
+      std::uint64_t undeclared_cap = 0;
+      if (t->total_bytes == 0) {
+        std::error_code sp_ec;
+        const auto sp = std::filesystem::space(std::filesystem::path(t->local_path).parent_path(), sp_ec);
+        constexpr std::uint64_t k_reserve = 1ULL << 30;
+        if (!sp_ec) {
+          // 剩餘不到 2 GB 時改成「最多用掉一半」，小磁碟不至於完全不能傳
+          const auto avail = static_cast<std::uint64_t>(sp.available);
+          undeclared_cap = std::max<std::uint64_t>(avail > 2 * k_reserve ? avail - k_reserve : avail / 2, 1);
+        }
+      }
       while (body.good()) {
         // §REVIEW-1103：Web UI／tray 取消後不再寫，刪掉寫一半的檔案
         if (file_transfer::manager::instance().is_canceled(token)) {
@@ -3934,7 +4050,8 @@ namespace nvhttp {
         auto n = body.gcount();
         if (n <= 0) break;
         // §REVIEW-1111：本體比事先宣告的檔案大小還長就停——原本照單全收，可以把磁碟寫滿
-        if (t->total_bytes > 0 && total + static_cast<std::uint64_t>(n) > t->total_bytes) {
+        if ((t->total_bytes > 0 && total + static_cast<std::uint64_t>(n) > t->total_bytes) ||
+            (undeclared_cap > 0 && total + static_cast<std::uint64_t>(n) > undeclared_cap)) {  // §REVIEW-1127 web_sec #12
           out.close();
           std::error_code rm_ec;
           std::filesystem::remove(t->local_path, rm_ec);
@@ -4226,10 +4343,20 @@ namespace nvhttp {
     // §REVIEW-1103：/applist、/cancel 原本沒擋（未配對就能拿 app 清單、作廢 VR 預約），
     // 改成四個端點共用同一個 localhost 檢查；位址先 normalize——雙堆疊綁定時本機會是
     // ::ffff:127.0.0.1，舊的 to_string() 比對會誤擋。正式 client 一律走 HTTPS，不受影響。
+    // §REVIEW-1127 web_sec #7：只看來源是 loopback 不夠——主機上瀏覽的任何網頁都能用 no-cors 的 <img>／fetch
+    // 打 http://127.0.0.1:47989/launch?…（拿不到回應，但副作用會發生），同機的其他程式也能直接打。
+    // 這四個端點唯一合法的呼叫者是同行程的 relay 代理（已用 Grep 確認：tray、VR orchestrator、正式 client 都不走
+    // HTTP 的這幾個端點；client 一律 HTTPS＋配對憑證），所以另外要求 relay 帶的行程內 token（X-Viple-Relay）。
     auto http_localhost_only = [](const char *what, auto &resp, auto &req) {
       auto remote = net::addr_to_normalized_string(req->remote_endpoint().address());
       if (remote != "127.0.0.1" && remote != "::1") {
         BOOST_LOG(warning) << "Rejected HTTP /" << what << " from non-localhost: " << remote;
+        *resp << "HTTP/1.0 403 Forbidden\r\n\r\n";
+        return false;
+      }
+      const auto tok = req->header.find("X-Viple-Relay");
+      if (tok == req->header.end() || !http::local_proxy_token_matches(tok->second)) {
+        BOOST_LOG(warning) << "[VIPLE-RELAY-TOKEN] Rejected HTTP /" << what << " from localhost without the relay token"sv;
         *resp << "HTTP/1.0 403 Forbidden\r\n\r\n";
         return false;
       }

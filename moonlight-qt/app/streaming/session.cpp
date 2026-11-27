@@ -585,6 +585,9 @@ static constexpr int kVrMsgQueueMax = 256;
 // PADMODE＝模式切換了（data1＝1 開／0 關）
 #define SDL_CODE_XR_PAD 115
 #define SDL_CODE_XR_PADMODE 116
+// §REVIEW-1127 qt_stream #3：連線狀態的 overlay 改由主執行緒畫（data1＝CONN_STATUS_*）。
+// 回呼在收影像的執行緒上，直接畫 TTF 會和其他執行緒同時用同一個字型，也會拖慢收包。
+#define SDL_CODE_CONNECTION_STATUS 117
 
 #include <openssl/rand.h>
 #include <algorithm>
@@ -817,16 +820,42 @@ void Session::clConnectionStatusUpdate(int connectionStatus)
         s_ActiveSession->m_ConnectionPoor.store(true);
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-NET] Connection status: POOR — FRUC will reduce latency mode");
-        s_ActiveSession->m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
-                                                            s_ActiveSession->m_StreamConfig.bitrate > 5000 ?
-                                                                "Slow connection to PC\nReduce your bitrate" : "Poor connection to PC");
-        s_ActiveSession->m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
         break;
     case CONN_STATUS_OKAY:
         s_ActiveSession->m_ConnectionPoor.store(false);
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-NET] Connection status: OKAY — FRUC resuming normal mode");
-        s_ActiveSession->m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, false);
+        break;
+    default:
+        return;
+    }
+
+    // §REVIEW-1127 qt_stream #3：m_ConnectionPoor 照舊在這裡即時更新（FRUC 依賴它），
+    // overlay 交給主執行緒（handleConnectionStatusOverlay），比照 rumble／LED 的寫法。
+    SDL_Event statusEvent = {};
+    statusEvent.type = SDL_USEREVENT;
+    statusEvent.user.code = SDL_CODE_CONNECTION_STATUS;
+    statusEvent.user.data1 = (void*)(intptr_t)connectionStatus;
+    SDL_PushEvent(&statusEvent);
+}
+
+// §REVIEW-1127 qt_stream #3：主執行緒上畫連線狀態的 overlay。事件排隊期間設定或滑鼠模式可能變了，所以再檢查一次。
+void Session::handleConnectionStatusOverlay(int connectionStatus)
+{
+    if (!m_Preferences->connectionWarnings || m_MouseEmulationRefCount > 0) {
+        return;
+    }
+
+    switch (connectionStatus)
+    {
+    case CONN_STATUS_POOR:
+        m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate,
+                                           m_StreamConfig.bitrate > 5000 ?
+                                               "Slow connection to PC\nReduce your bitrate" : "Poor connection to PC");
+        m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
+        break;
+    case CONN_STATUS_OKAY:
+        m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, false);
         break;
     }
 }
@@ -934,20 +963,22 @@ void Session::clVrMessage(const uint8_t* tlv, int length)
     // 各一次；原本六份都在這裡配置、複製、推 SDL 事件（其中一半發生在收影像的執行緒上），到主執行緒才用 eventId
     // 丟掉五份。兩手連續震動時是每秒上千次配置與事件。這裡只看「整則訊息就是一個震動 TLV」的情況，序號比對與
     // 主執行緒的去重相同（分左右手、32-bit 迴繞安全）；第一份照常往下送。
+    // §REVIEW-1127 qt_stream #8：原本在這裡就用 CAS 記下 eventId，後面配置或推送失敗時，同一則的重送也會被當成
+    // 已收而全部丟掉。改成這裡只比對；推送成功後才記下（見下面）。兩條執行緒同時通過比對最多多推一份，
+    // 主執行緒還有第二層去重，不會重複震動。
+    int hapticDev = -1;
+    uint32_t hapticEventId = 0;
     if (length == 2 + (int)sizeof(VIPLE_VR_TLV_HAPTIC) && tlv[0] == VIPLE_VR_S2C_HAPTIC && tlv[1] == sizeof(VIPLE_VR_TLV_HAPTIC)) {
         VIPLE_VR_TLV_HAPTIC h;
         memcpy(&h, tlv + 2, sizeof(h));
         const unsigned dev = (unsigned)h.device - VIPLE_VR_POSE_LEFT;
         if (dev < 2) {
-            uint64_t seen = s_VrHapticSeenCb[dev].load(std::memory_order_relaxed);
-            for (;;) {
-                if ((seen >> 32) != 0 && (int32_t)(h.eventId - (uint32_t)seen) <= 0) {
-                    return;  // 已經收下過這一則（或更新的）
-                }
-                if (s_VrHapticSeenCb[dev].compare_exchange_weak(seen, (1ull << 32) | h.eventId, std::memory_order_relaxed)) {
-                    break;
-                }
+            const uint64_t seen = s_VrHapticSeenCb[dev].load(std::memory_order_relaxed);
+            if ((seen >> 32) != 0 && (int32_t)(h.eventId - (uint32_t)seen) <= 0) {
+                return;  // 已經收下過這一則（或更新的）
             }
+            hapticDev = (int)dev;
+            hapticEventId = h.eventId;
         }
     }
     void* copy = SDL_malloc((size_t)length);
@@ -967,6 +998,16 @@ void Session::clVrMessage(const uint8_t* tlv, int length)
     }
     else {
         s_VrMsgQueued.fetch_add(1, std::memory_order_relaxed);
+        if (hapticDev >= 0) {
+            // §REVIEW-1127 qt_stream #8：推送成功才記下 eventId；別的執行緒已經記了更新的值就不覆蓋
+            uint64_t seen = s_VrHapticSeenCb[hapticDev].load(std::memory_order_relaxed);
+            while (!((seen >> 32) != 0 && (int32_t)(hapticEventId - (uint32_t)seen) <= 0)) {
+                if (s_VrHapticSeenCb[hapticDev].compare_exchange_weak(seen, (1ull << 32) | hapticEventId,
+                                                                      std::memory_order_relaxed)) {
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -1108,6 +1149,18 @@ void Session::handleVrMessage(const uint8_t* tlv, int length)
                     }
                     m_VrHapticLastEventId[dev] = h.eventId;
                     m_VrHapticHaveEventId[dev] = true;
+                }
+
+                // §REVIEW-1127 qt_xr #10：震動長度夾在 2 秒（和 server vr_bridge_win 的上限相同，合法 server 不會超過）。
+                // 原本 host 送來的值直接變成 OpenXR duration，下面的過期寬限也用它算，值很大時過期判斷等於失效
+                if (h.durationUs > 2000000u) {
+                    static uint32_t s_HapticClamped = 0;  // 只在主執行緒（handleVrMessage）
+                    if (s_HapticClamped++ < 3) {
+                        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                                    "[VIPLE-VR-HAPTIC] duration %u us from host clamped to 2000000 us (count=%u)",
+                                    h.durationUs, s_HapticClamped);
+                    }
+                    h.durationUs = 2000000u;
                 }
 
                 // §VR-HAPTIC-REDUNDANT：過期判定（超過 durationUs + 50 ms 寬限丟棄）。寬限要蓋過正常的單程延遲與時鐘
@@ -6237,10 +6290,9 @@ void Session::exec()
         if (audioOverlayHideTime != 0 &&
             SDL_TICKS_PASSED(SDL_GetTicks(), audioOverlayHideTime)) {
             audioOverlayHideTime = 0;
-            if (audioOverlayMsg != nullptr &&
-                strcmp(m_OverlayManager.getOverlayText(Overlay::OverlayStatusUpdate),
-                       audioOverlayMsg) == 0) {
-                m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, false);
+            // §REVIEW-1127 qt_stream #3：比對文字與收掉在 slot 鎖裡一起做
+            if (audioOverlayMsg != nullptr) {
+                m_OverlayManager.hideOverlayIfText(Overlay::OverlayStatusUpdate, audioOverlayMsg);
             }
             audioOverlayMsg = nullptr;
         }
@@ -6387,6 +6439,10 @@ void Session::exec()
 #endif
             case SDL_CODE_XR_REBUILD:
                 handleXrRebuild((uint32_t)(uintptr_t)event.user.data1);
+                break;
+            case SDL_CODE_CONNECTION_STATUS:
+                // §REVIEW-1127 qt_stream #3：收影像的執行緒推來的連線狀態，在這裡畫 overlay
+                handleConnectionStatusOverlay((int)(intptr_t)event.user.data1);
                 break;
             case SDL_CODE_VR_MESSAGE:
                 s_VrMsgQueued.fetch_sub(1, std::memory_order_relaxed);

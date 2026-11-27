@@ -12,6 +12,7 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -135,6 +136,30 @@ namespace vr::scene_focus {
         int fixes = 0;  // 同一個場景程式被搶回前景的次數（避免和別的程式無限拉鋸）
         uint32_t idle_ticks = 0;  // 沒有場景程式的拍數
         uint32_t ticks = 0;
+        // §REVIEW-1127 vr #5：launched_pids_() 每次對系統上每個行程做 OpenProcess＋QueryFullProcessImageNameW，
+        // §VR-PADMODE 的非 VR 遊戲整場都沒有場景 pid，原本整場每 2 秒掃一次。改成：找到遊戲視窗後快取 pid／視窗，
+        // 行程還活著、視窗還在就直接用，只每 10 秒重掃一次（啟動器先開、遊戲本體後開時仍能換到較大的視窗）；
+        // 行程結束或視窗消失就立刻重掃。一直找不到時，前 60 秒照舊每 2 秒、之後放慢到 10 秒。
+        DWORD cached_pid = 0;
+        HWND cached_hwnd = nullptr;
+        HANDLE cached_proc = nullptr;
+        uint32_t ticks_since_found = 0;
+        bool rescan_now = false;
+        auto drop_cache = [&]() {
+          if (cached_proc) {
+            CloseHandle(cached_proc);
+          }
+          cached_proc = nullptr;
+          cached_pid = 0;
+          cached_hwnd = nullptr;
+        };
+        struct cache_closer_t {
+          std::function<void()> f;
+
+          ~cache_closer_t() {
+            f();
+          }
+        } cache_closer {drop_cache};
         while (true) {
           {
             std::unique_lock lk(mtx_);
@@ -145,23 +170,53 @@ namespace vr::scene_focus {
             }
           }
           DWORD pid = scene_pid_ ? scene_pid_() : 0;
-          // 還沒有場景程式：看這一場啟動的遊戲有沒有開出視窗（每 2 秒列一次行程）。有多個行程時挑視窗最大的那個
+          // 還沒有場景程式：看這一場啟動的遊戲有沒有開出視窗。有多個行程時挑視窗最大的那個
           bool launched = false;
-          if (pid == 0 && launched_pids_ && (++idle_ticks % 2) == 0) {
-            LONG best_area = -1;
-            for (const auto p : launched_pids_()) {
-              const HWND h = main_window(p);
-              if (!h) {
-                continue;
+          if (pid == 0 && launched_pids_) {
+            ++idle_ticks;
+            ++ticks_since_found;
+            // §REVIEW-1127 vr #5：快取失效（行程結束或視窗消失）就丟掉並立刻重掃
+            // （OpenProcess 拿不到 handle 時只看視窗，不要每拍都丟掉快取、退化成每秒全掃）
+            if (cached_pid != 0 &&
+                ((cached_proc && WaitForSingleObject(cached_proc, 0) != WAIT_TIMEOUT) || !IsWindow(cached_hwnd) || !IsWindowVisible(cached_hwnd))) {
+              drop_cache();
+              rescan_now = true;
+            }
+            const uint32_t scan_every = (cached_pid != 0 || ticks_since_found > 60) ? 10 : 2;
+            if (rescan_now || (idle_ticks % scan_every) == 0) {
+              rescan_now = false;
+              LONG best_area = -1;
+              HWND best_hwnd = nullptr;
+              for (const auto p : launched_pids_()) {
+                const HWND h = main_window(p);
+                if (!h) {
+                  continue;
+                }
+                RECT r {};
+                GetWindowRect(h, &r);
+                const LONG area = std::max<LONG>(0, r.right - r.left) * std::max<LONG>(0, r.bottom - r.top);
+                if (area > best_area) {
+                  best_area = area;
+                  best_hwnd = h;
+                  pid = p;
+                  launched = true;
+                }
               }
-              RECT r {};
-              GetWindowRect(h, &r);
-              const LONG area = std::max<LONG>(0, r.right - r.left) * std::max<LONG>(0, r.bottom - r.top);
-              if (area > best_area) {
-                best_area = area;
-                pid = p;
-                launched = true;
+              if (launched) {
+                if (pid != cached_pid) {
+                  drop_cache();
+                  cached_pid = pid;
+                  cached_proc = OpenProcess(SYNCHRONIZE, FALSE, pid);  // 拿不到（nullptr）時只靠視窗判斷失效
+                }
+                cached_hwnd = best_hwnd;
+                ticks_since_found = 0;
+              } else {
+                drop_cache();
               }
+            } else if (cached_pid != 0 && (idle_ticks % 2) == 0) {
+              // 照舊隔一拍才處理一次遊戲視窗（拉前景的頻率與次數上限跟修正前一樣）
+              pid = cached_pid;
+              launched = true;
             }
           }
           if (pid == 0 && last_pid != 0 && launched_pids_) {

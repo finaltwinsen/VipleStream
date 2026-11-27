@@ -133,6 +133,7 @@ namespace vr::mv_pair {
     vrmv_shm_t *shm,
     const vrmv_desc_t &desc,
     const void *payload,
+    size_t payload_len,  // §REVIEW-1127 vr #10：payload 的實際長度；desc.payload_bytes 超過它就不寫
     uint64_t &inout_seq_counter
   ) noexcept;
 

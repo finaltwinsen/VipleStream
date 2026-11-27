@@ -111,6 +111,10 @@ public class UsbDriverService extends Service implements UsbDriverListener {
             // Initial attachment broadcast
             if (action.equals(UsbManager.ACTION_USB_DEVICE_ATTACHED)) {
                 final UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                // §REVIEW-1127 android #11：防禦性檢查，沒有裝置就不排程
+                if (device == null) {
+                    return;
+                }
 
                 // shouldClaimDevice() looks at the kernel's enumerated input
                 // devices to make its decision about whether to prompt to take
@@ -140,8 +144,16 @@ public class UsbDriverService extends Service implements UsbDriverListener {
                     stateListener.onUsbPermissionPromptCompleted();
                 }
 
+                // §REVIEW-1127 android #11：API 33 以下這個 receiver 是 exported，任何 App 都能送
+                // 沒帶裝置的偽造廣播；device 為 null 會讓 handleUsbDeviceState NPE、整個 App 當掉。
+                // 是否授權也以系統的 hasPermission 為準，不只看 extra（避免偽造的 granted 反覆跳權限對話框）。
+                if (device == null || usbManager == null) {
+                    return;
+                }
+
                 // If we got this far, we've already found we're able to handle this device
-                if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) &&
+                        usbManager.hasPermission(device)) {
                     handleUsbDeviceState(device);
                 }
             }

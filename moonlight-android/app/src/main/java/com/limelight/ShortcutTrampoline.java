@@ -313,7 +313,6 @@ public class ShortcutTrampoline extends Activity {
         inForeground = true;
 
         UiHelper.notifyNewRootView(this);
-        ComputerDatabaseManager dbManager = new ComputerDatabaseManager(this);
         ComputerDetails _computer = null;
 
         // PC arguments, both are optional, but at least one must be provided
@@ -331,7 +330,14 @@ public class ShortcutTrampoline extends Activity {
 
         if (uuidString == null || uuidString.isEmpty()) {
             // Use nameString to find the corresponding UUID
-            _computer = dbManager.getComputerByName(nameString);
+            // §REVIEW-1127 android #7：DB 只在這裡用到；原本每次啟動都開連線且從不關閉，
+            // 改成用到才開、查完就關
+            ComputerDatabaseManager dbManager = new ComputerDatabaseManager(this);
+            try {
+                _computer = dbManager.getComputerByName(nameString);
+            } finally {
+                dbManager.close();
+            }
 
             if (_computer == null) {
                 Dialog.displayDialog(ShortcutTrampoline.this,

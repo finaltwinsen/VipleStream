@@ -85,6 +85,7 @@ namespace platf::dxgi {
     HRESULT status;
     dxgi::dxgi_t dxgi;
     winrt::com_ptr<::IInspectable> d3d_comhandle;
+    cursor_capture_applied = -1;  // §REVIEW-1127 video #13：新的 capture session，快取作廢
     try {
       if (!winrt::GraphicsCaptureSession::IsSupported()) {
         BOOST_LOG(error) << "Screen capture is not supported on this device for this release of Windows!"sv;
@@ -237,10 +238,15 @@ namespace platf::dxgi {
   }
 
   int wgc_capture_t::set_cursor_visible(bool x) {
+    // §REVIEW-1127 video #13：值沒變就不做 WinRT 呼叫（session 重建時 init 會清掉快取）
+    if (cursor_capture_applied == (int) x) {
+      return 0;
+    }
     try {
       if (capture_session.IsCursorCaptureEnabled() != x) {
         capture_session.IsCursorCaptureEnabled(x);
       }
+      cursor_capture_applied = (int) x;
       return 0;
     } catch (winrt::hresult_error &) {
       return -1;

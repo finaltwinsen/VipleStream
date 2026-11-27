@@ -2501,6 +2501,9 @@ namespace quic_server {
         if (recvLen > 0) {
           totalRecv++;
 
+          // §REVIEW-1127 net N1：currentTime 是 select 之前取的，select 等掉的時間（有 session 最多 1 ms、
+          // 握手期最多 50 ms）會讓接收時間偏早、RTT 樣本系統性偏低（BBR min_rtt 剛好挑到偏最多的）。收到後重取。
+          currentTime = picoquic_current_time();
           int pktRet = picoquic_incoming_packet(
               _quic, recvBuf, (size_t)recvLen,
               (struct sockaddr *)&peerAddr,

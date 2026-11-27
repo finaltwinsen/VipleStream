@@ -175,6 +175,7 @@ namespace vrdrv {
     double ctrl_keep_last_s = -1.0;
     double ctrl_acc_max = 0.0;
     const int64_t f = ctx_.qpf;
+    uint32_t unusable_polls = 0;  // §REVIEW-1127 vr #4：連續幾次輪詢都沒有可用 generation
 
     for (;;) {
       if (degraded()) {
@@ -204,11 +205,17 @@ namespace vrdrv {
           push_timing(ctx_, VRIPC_TE_STALE, 0, 3, 0);
         }
         have = false;
-        if (WaitForSingleObject(stop_evt_, 10) == WAIT_OBJECT_0) {
+        // §REVIEW-1127 vr #4：沒有可用 generation 時原本整段（driver 載入到場次開始、場次之間）每 10 ms 輪詢一次。
+        // 剛變成不可用的前 50 次（約 0.5 秒）照舊 10 ms，讓短暫斷線／換 generation 馬上接回；之後放慢到 100 ms
+        // （場次開始時第一筆追蹤最多晚 100 ms，那時還在握手與 TEXTURES 階段）。
+        const DWORD idle_wait_ms = unusable_polls < 50 ? 10 : 100;
+        ++unusable_polls;
+        if (WaitForSingleObject(stop_evt_, idle_wait_ms) == WAIT_OBJECT_0) {
           break;
         }
         continue;
       }
+      unusable_polls = 0;  // §REVIEW-1127 vr #4
       if (gen->id() != cur_gen) {
         cur_gen = gen->id();
         last_idx = UINT64_MAX;

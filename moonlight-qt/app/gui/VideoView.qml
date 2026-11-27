@@ -828,7 +828,8 @@ Item {
                                         width: 14; height: 14; radius: 7
                                         color: model.online ? "#4caf50" : "#777777"
                                     }
-                                    Label { text: model.name; font.pointSize: 16; font.bold: true; Layout.fillWidth: true; elide: Text.ElideRight }
+                                    // §REVIEW-1127 qt_ui #2：主機名稱來自網路，不當成 HTML
+                                    Label { text: model.name; textFormat: Text.PlainText; font.pointSize: 16; font.bold: true; Layout.fillWidth: true; elide: Text.ElideRight }
                                     Label { text: model.online ? qsTr("Online") : qsTr("Offline"); opacity: 0.7 }
                                 }
                                 onClicked: openHost(model.hostIdx, model.name)

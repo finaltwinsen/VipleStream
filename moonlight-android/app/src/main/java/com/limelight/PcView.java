@@ -429,10 +429,12 @@ public class PcView extends Activity implements AdapterFragmentCallbacks {
             Dialog.displayDialog(this, getResources().getString(R.string.pair_pairing_title), pairingMsg, false);
         }
 
-        // 單次讀取開發測試更新網址並立即從 Intent 移除，避免返回畫面時重複觸發或寫入偏好。
+        // §REVIEW-1127 android #1：PcView 是 exported 的 LAUNCHER，任何 App 都能帶 dev_update_url，
+        // 讓手機略過更新關閉與計量網路的限制去下載。改由需要 DUMP 權限的 CliStreamActivity 接收
+        // （adb 仍可用、一般 App 不行）；這裡只把 extra 丟掉。
         Intent intent = getIntent();
         if (intent != null && intent.hasExtra(AppUpdater.EXTRA_DEV_UPDATE_URL)) {
-            AppUpdater.setDevUpdateUrl(intent.getStringExtra(AppUpdater.EXTRA_DEV_UPDATE_URL));
+            LimeLog.warning("[VIPLE-UPDATE] Ignoring dev_update_url on PcView; use CliStreamActivity (adb) instead");
             intent.removeExtra(AppUpdater.EXTRA_DEV_UPDATE_URL);
         }
 

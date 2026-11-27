@@ -444,7 +444,20 @@ NvHTTP::getBoxArt(int appId)
                                           "&AssetType=2&AssetIdx=0",
                                           REQUEST_TIMEOUT_MS,
                                           NvLogLevel::NVLL_VERBOSE);
-    QImage image = QImageReader(reply).read();
+    // §REVIEW-1127 qt_ui #16：回應沒有大小上限、整個解碼。正常封面通常 < 1 MB；超過 16 MiB 就不解，
+    // 解碼的配置上限也從 Qt 預設的 256 MB 降到 64 MB
+    static constexpr qint64 kMaxBoxArtBytes = 16ll * 1024 * 1024;
+    QImage image;
+    if (reply->bytesAvailable() <= kMaxBoxArtBytes) {
+        QImageReader reader(reply);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        reader.setAllocationLimit(64);
+#endif
+        image = reader.read();
+    }
+    else {
+        qWarning() << "[VIPLE-BOXART] appasset response too large:" << reply->bytesAvailable() << "bytes, app" << appId;
+    }
     delete reply;
 
     return image;

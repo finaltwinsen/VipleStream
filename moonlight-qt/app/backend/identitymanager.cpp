@@ -2,6 +2,7 @@
 #include "utils.h"
 
 #include <QDebug>
+#include <QFile>
 
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
@@ -133,6 +134,22 @@ IdentityManager::IdentityManager()
     if (getSslKey().isNull()) {
         qFatal("Private key is unreadable");
     }
+
+#ifndef Q_OS_WIN
+    // §REVIEW-1127 qt_ui #8：設定檔裡有未加密的私鑰（對所有已配對 host 的身分）與 relay PSK。家目錄權限寬鬆
+    // （0755 的舊系統、多人共用機器）時其他使用者讀得到，所以設成只有自己能讀寫。只在檔案存在時做；
+    // 之後 QSettings 存檔（QSaveFile）會沿用既有檔案的權限
+    settings.sync();
+    const QString settingsPath = settings.fileName();
+    if (!settingsPath.isEmpty()) {
+        if (QFile::exists(settingsPath)) {
+            const QFileDevice::Permissions want = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
+            if (QFile::permissions(settingsPath) != want && !QFile::setPermissions(settingsPath, want)) {
+                qWarning() << "[VIPLE-IDENTITY] could not restrict settings file permissions:" << settingsPath;
+            }
+        }
+    }
+#endif
 }
 
 QSslCertificate

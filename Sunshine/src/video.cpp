@@ -217,18 +217,28 @@ namespace video {
     /**
      * When preserving aspect ratio, ensure that padding is black
      */
-    void prefill() {
+    int prefill() {
       auto frame = sw_frame ? sw_frame.get() : this->frame;
+      // §REVIEW-1127 video #7：av_frame_get_buffer 對已經有緩衝的 frame（軟體編碼時 frame 來自 avcodec）回 EINVAL，
+      // 所以不看這兩個呼叫的回傳值，改在之後檢查 data[0]：配置失敗（OOM）才回錯，避免 fill_black 寫空指標。
       av_frame_get_buffer(frame, 0);
       av_frame_make_writable(frame);
+      if (!frame->data[0]) {
+        BOOST_LOG(error) << "Failed to allocate the software conversion frame"sv;
+        return -1;
+      }
       ptrdiff_t linesize[4] = {frame->linesize[0], frame->linesize[1], frame->linesize[2], frame->linesize[3]};
       av_image_fill_black(frame->data, linesize, (AVPixelFormat) frame->format, frame->color_range, frame->width, frame->height);
+      return 0;
     }
 
     int init(int in_width, int in_height, AVFrame *frame, AVPixelFormat format, bool hardware) {
       // If the device used is hardware, yet the image resides on main memory
       if (hardware) {
         sw_frame.reset(av_frame_alloc());
+        if (!sw_frame) {
+          return -1;  // §REVIEW-1127 video #7：av_frame_alloc 失敗（OOM）不可解參照
+        }
 
         sw_frame->width = frame->width;
         sw_frame->height = frame->height;
@@ -238,7 +248,9 @@ namespace video {
       }
 
       // Fill aspect ratio padding in the destination frame
-      prefill();
+      if (prefill()) {
+        return -1;  // §REVIEW-1127 video #7
+      }
 
       auto out_width = frame->width;
       auto out_height = frame->height;
@@ -249,11 +261,14 @@ namespace video {
       out_height = in_height * scalar;
 
       sws_input_frame.reset(av_frame_alloc());
+      sws_output_frame.reset(av_frame_alloc());
+      if (!sws_input_frame || !sws_output_frame) {
+        return -1;  // §REVIEW-1127 video #7：av_frame_alloc 失敗（OOM）不可解參照
+      }
       sws_input_frame->width = in_width;
       sws_input_frame->height = in_height;
       sws_input_frame->format = AV_PIX_FMT_BGR0;
 
-      sws_output_frame.reset(av_frame_alloc());
       sws_output_frame->width = out_width;
       sws_output_frame->height = out_height;
       sws_output_frame->format = format;
@@ -1587,6 +1602,9 @@ namespace video {
     return front;
   }
 
+  // §REVIEW-1127 video #8：還沒結束的 NVENC 非同步拆除執行緒數（卡在驅動裡的會一直算在內），印在 log 方便判讀
+  static std::atomic<int> pending_async_teardowns {0};
+
   void captureThread(
     std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
     sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
@@ -1740,6 +1758,9 @@ namespace video {
     platf::set_thread_name("video::capture");
     platf::adjust_thread_priority(platf::thread_priority_e::critical);
 
+    // §REVIEW-1127 video #2：最近 10 秒內被轉成 reinit 的擷取錯誤時刻
+    std::vector<std::chrono::steady_clock::time_point> recent_capture_errors;
+
     while (capture_ctx_queue->running()) {
       bool artificial_reinit = false;
 
@@ -1790,6 +1811,24 @@ namespace video {
         artificial_reinit = false;
       }
 
+      // §REVIEW-1127 video #2：桌面擷取的 capture_e::error（GetFramePointerShape、staging 貼圖、Map 等在
+      // DEVICE_REMOVED／TDR 時失敗）原本直接結束整條擷取＝串流斷線。改成有上限的 reinit：10 秒內前兩次當 reinit
+      // （重建 display 與編碼器、client 看到一次 IDR），第三次才照舊結束。VR（display_vr_t）不套用：它的 error
+      // 包含刻意的停止（NETBENCH 片段解碼放棄），且 VR display 重建失敗時重建迴圈會無限重試，行為照舊。
+      if (status == platf::capture_e::error && disp_source != 1) {
+        const auto now = std::chrono::steady_clock::now();
+        std::erase_if(recent_capture_errors, [&](const auto &t) {
+          return now - t > 10s;
+        });
+        if (recent_capture_errors.size() < 2) {
+          recent_capture_errors.push_back(now);
+          BOOST_LOG(warning) << "[VIPLE-CAP-ERR] capture failed; reinitializing the display ("sv << recent_capture_errors.size() << "/2 in 10 s)"sv;
+          status = platf::capture_e::reinit;
+        } else {
+          BOOST_LOG(error) << "[VIPLE-CAP-ERR] capture failed 3 times within 10 s; ending capture"sv;
+        }
+      }
+
       switch (status) {
         case platf::capture_e::reinit:
           {
@@ -1803,7 +1842,29 @@ namespace video {
             // display_wp is modified in this thread only
             // Wait for the other shared_ptr's of display to be destroyed.
             // New displays will only be created in this thread.
+            // §REVIEW-1127 video N1／#4／#8：NVENC 非同步拆除執行緒卡在驅動裡時會永遠握著 display（session →
+            // encode device → base.display），原本這裡沒有任何退出條件：之後所有 session 黑畫面，最後
+            // end_capture_async 的 join() 也跟著卡死。佇列停止就直接離開；等太久就放棄等待、照常進下面的重建迴圈
+            // （舊物件留給卡住的執行緒；DDA 拒絕第二個 duplication 時重建迴圈本來就會一直重試）。
+            // 逾時取 10 秒：正常持有者（編碼執行緒）看到 reinit_event 後一幀內放手、最久卡在 async 事件 2.1 秒，
+            // 超過 10 秒還握著的只會是掛在驅動裡、不會再取用影像的執行緒。
+            const auto reinit_wait_started = std::chrono::steady_clock::now();
+            bool reinit_wait_warned = false;
             while (display_wp->use_count() != 1) {
+              if (!capture_ctx_queue->running()) {
+                return;  // §REVIEW-1127 video N1：所有 session 都結束了，讓 join() 能完成
+              }
+              const auto reinit_waited = std::chrono::steady_clock::now() - reinit_wait_started;
+              if (!reinit_wait_warned && reinit_waited >= 3s) {
+                reinit_wait_warned = true;
+                BOOST_LOG(warning) << "[VIPLE-REINIT-WAIT] display still referenced after 3 s (use_count="sv << display_wp->use_count()
+                                   << ", pending async teardowns="sv << pending_async_teardowns.load() << ')';
+              }
+              if (reinit_waited >= 10s) {
+                BOOST_LOG(error) << "[VIPLE-REINIT-WAIT] giving up waiting for the old display (use_count="sv << display_wp->use_count()
+                                 << ", pending async teardowns="sv << pending_async_teardowns.load() << "); recreating it anyway"sv;
+                break;
+              }
               // Free images that weren't consumed by the encoders. These can reference the display and prevent
               // the ref count from reaching 1. We do this here rather than on the encoder thread to avoid race
               // conditions where the encoding loop might free a good frame after reinitializing if we capture
@@ -2643,10 +2704,13 @@ namespace video {
     // streaming to continue without requiring a full restart of Sunshine.
     auto fail_guard = util::fail_guard([&encoder, &session] {
       if (encoder.flags & ASYNC_TEARDOWN) {
-        std::thread encoder_teardown_thread {[session = std::move(session)]() mutable {
-          BOOST_LOG(info) << "Starting async encoder teardown";
+        // §REVIEW-1127 video #8：計數未完成的拆除執行緒，log 帶出目前數量（判斷是否有卡在驅動裡的）
+        const int pending = ++pending_async_teardowns;
+        std::thread encoder_teardown_thread {[session = std::move(session), pending]() mutable {
+          BOOST_LOG(info) << "Starting async encoder teardown (pending="sv << pending << ')';
           session.reset();
-          BOOST_LOG(info) << "Async encoder teardown complete";
+          const int left = --pending_async_teardowns;
+          BOOST_LOG(info) << "Async encoder teardown complete (pending="sv << left << ')';
         }};
         encoder_teardown_thread.detach();
       }
@@ -3201,7 +3265,11 @@ namespace video {
         if (!pop_waker) {
           pop_waker = std::make_unique<pop_waker_t<std::remove_reference_t<decltype(*images)>>>(&*images);
         }
-        pop_waker->arm(pop_deadline);
+        // §REVIEW-1127 video #11：影像已經在了就不必 arm（pop_until 立刻返回，arm 只會讓 waker 到時多叫醒一次）。
+        // 只有這個執行緒會 pop，peek 看到的影像不會消失；peek 看到空、之後才到的情況照舊 arm，行為不變。
+        if (!images->peek()) {
+          pop_waker->arm(pop_deadline);
+        }
         auto img = images->pop_until(pop_deadline);
         pop_anchor = img ? std::chrono::steady_clock::now() : pop_deadline;
         if (img) {

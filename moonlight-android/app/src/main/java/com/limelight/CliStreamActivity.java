@@ -19,6 +19,7 @@ import com.limelight.glasses.VitureV2Protocol;
 import com.limelight.nvstream.http.ComputerDetails;
 import com.limelight.nvstream.http.NvApp;
 import com.limelight.nvstream.http.NvHTTP;
+import com.limelight.utils.AppUpdater;
 import com.limelight.utils.CacheHelper;
 import com.limelight.utils.QuestSupport;
 import com.limelight.vr.QxrNative;
@@ -57,6 +58,10 @@ import java.util.List;
  *     [--ez glasses_vr false]        # true：VITURE 眼鏡當 3DoF PCVR。要載入得到 viple-openxr，而且找得到眼鏡 USB
  *     [--es glasses_axis +x,+y,+z]   # 覆寫並存下軸向對應。格式錯誤就改回預設
  *
+ * 測試自我更新（§REVIEW-1127 android #1，原本帶在 PcView 上）：
+ *   adb shell am start -n com.piinsta/com.limelight.CliStreamActivity --es dev_update_url "<base url>"
+ *   帶了 dev_update_url 就只設定測試更新網址並回到主畫面，不開串流（不需要 host）。
+ *
  * Prerequisites: the host must already be paired via the normal UI flow.
  */
 public class CliStreamActivity extends Activity {
@@ -66,6 +71,21 @@ public class CliStreamActivity extends Activity {
         super.onCreate(savedInstanceState);
 
         Intent in = getIntent();
+
+        // §REVIEW-1127 android #1：dev_update_url 原本由 exported 的 PcView 接收，任何 App 都能觸發；
+        // 改由這個需要 DUMP 權限的入口接收（adb shell 有、一般 App 沒有）。設好之後回到 PcView，
+        // 由它的 onResume 照原流程跑一次測試更新；串流中就不切畫面，等回到 PcView 時再跑。
+        if (in.hasExtra(AppUpdater.EXTRA_DEV_UPDATE_URL)) {
+            AppUpdater.setDevUpdateUrl(in.getStringExtra(AppUpdater.EXTRA_DEV_UPDATE_URL));
+            if (!Game.isStreaming() && !VrStreamActivity.isStreaming()) {
+                Intent pcView = new Intent(this, PcView.class);
+                pcView.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+                startActivity(pcView);
+            }
+            finish();
+            return;
+        }
+
         String host = in.getStringExtra("host");
         String appName = in.getStringExtra("app");
 

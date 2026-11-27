@@ -169,6 +169,12 @@ int parseRtspMessage(PRTSP_MESSAGE msg, char* rtspMessage, int length) {
                 // endCheck points to the remainder of messageBuffer after the token
                 endCheck = &token[0] + strlen(token) + 1;
 
+                // §REVIEW-1127 commonc #2：最後一個 token 後面沒有任何 CR/LF 時，endCheck 會
+                // 指到配置範圍（length+1）之外；視為格式錯誤（messageEnded 維持 false）
+                if (endCheck > messageBuffer + length) {
+                    break;
+                }
+
                 // See if we've hit the end of the message. The first \r is missing because it's been tokenized
                 if (startsWith(endCheck, "\n") && endCheck[1] == '\0') {
                     // RTSP over ENet doesn't always have the second CRLF for some reason

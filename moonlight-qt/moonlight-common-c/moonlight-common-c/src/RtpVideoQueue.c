@@ -1220,7 +1220,11 @@ cleanup_packets:
                     dataOffset += 4;
                 }
                 LC_ASSERT(isBefore16(rtpPacket->sequenceNumber, queue->bufferFirstParitySequenceNumber));
-                queuePacket(queue, queueEntry, rtpPacket, StreamConfig.packetSize + dataOffset, false, true);
+                // §REVIEW-1127 commonc #10：被判為重複（回 false）時封包沒有入列，要自己釋放
+                if (!queuePacket(queue, queueEntry, rtpPacket, StreamConfig.packetSize + dataOffset, false, true)) {
+                    free(packets[i]);
+                    packets[i] = NULL;
+                }
             } else if (packets[i] != NULL) {
                 free(packets[i]);
                 packets[i] = NULL;

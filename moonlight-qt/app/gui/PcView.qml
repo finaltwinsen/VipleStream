@@ -528,6 +528,8 @@ CenteredGridView {
         Label {
             id: pcNameText
             text: model.name
+            // §REVIEW-1127 qt_ui #2：主機名稱在未配對時就從明文 /serverinfo 來，不當成 HTML（<img> 會載入遠端圖片）
+            textFormat: Text.PlainText
 
             anchors.top: pcDivider.bottom
             anchors.topMargin: 6

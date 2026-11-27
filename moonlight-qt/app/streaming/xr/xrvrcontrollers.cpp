@@ -1170,7 +1170,9 @@ void XrVrControllers::applyPendingHaptics()
         hai.action = m_Haptic;
         hai.subactionPath = m_Hands[h];
         XrHapticVibration vib = xrStruct<XrHapticVibration>(XR_TYPE_HAPTIC_VIBRATION);
-        vib.duration = r.durationUs == 0 ? XR_MIN_HAPTIC_DURATION : static_cast<XrDuration>(r.durationUs) * 1000;
+        // §REVIEW-1127 qt_xr #10：再夾一次 2 秒（session 收訊息時已夾過，這裡防其他呼叫端）
+        vib.duration = r.durationUs == 0 ? XR_MIN_HAPTIC_DURATION
+                                         : static_cast<XrDuration>((std::min)(r.durationUs, 2000000u)) * 1000;
         vib.frequency = (std::isfinite(r.frequencyHz) && r.frequencyHz > 0.0f) ? r.frequencyHz : XR_FREQUENCY_UNSPECIFIED;
         vib.amplitude = std::isfinite(r.amplitude) ? std::min(std::max(r.amplitude, 0.0f), 1.0f) : 0.0f;
         const XrResult rr = xrApplyHapticFeedback(m_Session, &hai,

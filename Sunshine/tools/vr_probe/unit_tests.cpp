@@ -2036,7 +2036,8 @@ namespace probe {
           d.mv_scale[1] = 1.0f;
           d.depth_ref = 1.0f;
 
-          vr::mv_pair::shm_write_slot_for_test(shm, d, write_buf.data(), seq_counter);
+          // §REVIEW-1127 vr #10：一併傳 payload 實際長度
+          vr::mv_pair::shm_write_slot_for_test(shm, d, write_buf.data(), write_buf.size() * sizeof(uint64_t), seq_counter);
           writes_done.fetch_add(1, std::memory_order_relaxed);
         }
       });

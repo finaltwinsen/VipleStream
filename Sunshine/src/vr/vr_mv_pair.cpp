@@ -265,9 +265,11 @@ namespace vr::mv_pair {
     vrmv_shm_t *shm,
     const vrmv_desc_t &desc,
     const void *payload,
+    size_t payload_len,
     uint64_t &inout_seq_counter
   ) noexcept {
-    if (!shm || !payload || desc.mv_frame_id == 0 || desc.payload_bytes > VRMV_SLOT_PAYLOAD_BYTES) {
+    // §REVIEW-1127 vr #10：以 desc.payload_bytes 當長度 memcpy，payload 沒有大小資訊——加長度參數擋讀越界
+    if (!shm || !payload || desc.mv_frame_id == 0 || desc.payload_bytes > VRMV_SLOT_PAYLOAD_BYTES || desc.payload_bytes > payload_len) {
       return;
     }
     const uint32_t slot_idx = static_cast<uint32_t>(desc.mv_frame_id % VRMV_SLOTS);

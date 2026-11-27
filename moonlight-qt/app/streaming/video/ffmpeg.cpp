@@ -235,6 +235,10 @@ static_assert(EAGAIN != WSAEWOULDBLOCK, "EAGAIN must keep its CRT value in ffmpe
 
 #define MAX_SPS_EXTRA_SIZE 16
 
+// §REVIEW-1127 qt_stream #1：單幀位元流的上限（原本只寫在 submitDecodeUnit 的一般解碼路徑裡）。
+// PyroWave 分支也要先過這個檢查，所以拉到檔案層級兩處共用。pyrowave_decoder_bridge.cpp 有同值的一份。
+static constexpr int64_t kMaxPacketBufferBytes = 64ll * 1024 * 1024;
+
 #define FAILED_DECODES_RESET_THRESHOLD 20
 
 // §K.4 — 一次性 Vulkan video decode queue 探測（啟動延遲防護）
@@ -4174,6 +4178,8 @@ void FFmpegVideoDecoder::decoderThreadProc()
         bool freshSubmit = false;      // 剛送進一張、而且解碼器裡只有這一張：下一次等待可以用 preSleepUs
         bool preSlept = false;         // 上一次等待是 preSleepUs，之後還沒有再輪詢過
         uint32_t preSleepBackoffs = 0; // 這個視窗：睡完第一次問就有輸出（可能睡過頭）而縮短了幾次
+        // §REVIEW-1127 qt_stream #4：最近一次取到輸出的時刻（0＝還沒有）。和 lastSubmitUs 一起判斷解碼器是不是停住了
+        uint64_t lastOutputUs = 0;
     } vrPoll;
     // §VR-DECPOLL2：VR（真 XR）時「沒有輸出也沒有新輸入」改成每 100 µs 問一次（原本 SDL_Delay(1)：頭盔 HEVC 幾乎每幀都
     // 睡一次、recvWait p50 1065 µs＝等滿 1 ms 才拿到早就解好的幀）。
@@ -4495,6 +4501,9 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     // Capture a frame timestamp to measuring pacing delay
                     const uint64_t receivedAtUs = LiGetMicroseconds();
                     frame->pkt_dts = receivedAtUs;
+                    if (pollStats) {
+                        vrPoll.lastOutputUs = receivedAtUs;  // §REVIEW-1127 qt_stream #4：有進展，輪詢恢復 100 µs
+                    }
                     if (pollStats && vrPoll.lastSubmitUs != 0 && vrPoll.recvWaitUs.size() < kVrPollCap) {
                         // §VR-DECPOLL：沿用上面那一次讀到的時鐘，不另外取
                         vrPoll.recvWaitUs.push_back((uint32_t)(std::min<uint64_t>)(
@@ -4640,7 +4649,13 @@ void FFmpegVideoDecoder::decoderThreadProc()
                                 vrPoll.preSlept = true;
                             }
                             else {
-                                std::this_thread::sleep_for(std::chrono::microseconds(vrPollUs));  // §VR-DECPOLL2
+                                // §REVIEW-1127 qt_stream #4：解碼器手上有幀、卻超過 20 ms 沒有輸出也沒有新輸入（遠大於正常解碼時間）
+                                // ＝停住了。原本會一直每 100 µs 空轉到有新輸入為止；這時改成 1 ms。有輸出或新輸入就回到 100 µs，
+                                // 正常幀的延遲不變
+                                const uint64_t progressUs = (std::max)(vrPoll.lastSubmitUs, vrPoll.lastOutputUs);
+                                const uint64_t pollNowUs = LiGetMicroseconds();
+                                const bool stalled = progressUs != 0 && pollNowUs > progressUs + 20000u;
+                                std::this_thread::sleep_for(std::chrono::microseconds(stalled ? 1000u : vrPollUs));  // §VR-DECPOLL2
                                 vrPoll.preSlept = false;
                             }
                             vrPoll.freshSubmit = false;
@@ -5307,12 +5322,10 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         // 已改寫同一 slot，文字不再是自己的就不收（getOverlayText 與寫入方
         // 有理論上的讀寫 race，此處僅做字串比對決定收不收，屬良性）。
         if (m_RatioWarnOverlayHideSec > 0 && --m_RatioWarnOverlayHideSec == 0) {
-            if (Session::get() &&
-                strcmp(Session::get()->getOverlayManager().getOverlayText(
-                           Overlay::OverlayStatusUpdate),
-                       m_RatioWarnLastMsg) == 0) {
-                Session::get()->getOverlayManager().setOverlayState(
-                    Overlay::OverlayStatusUpdate, false);
+            // §REVIEW-1127 qt_stream #3：比對文字與收掉改在 slot 鎖裡一起做（原本兩步之間可能被別的寫入者插進來）
+            if (Session::get()) {
+                Session::get()->getOverlayManager().hideOverlayIfText(
+                    Overlay::OverlayStatusUpdate, m_RatioWarnLastMsg);
             }
         }
 
@@ -5382,6 +5395,11 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     m_ActiveWndVideoStats.totalFrames++;
 
     if (m_PyroWaveBridge) {
+        // §REVIEW-1127 qt_stream #1：PyroWave 原本繞過下面的 fullLength 檢查，bridge 直接拿去 reserve。
+        // 每幀都是 intra 幀，異常幀丟掉就好，不要 IDR（同 bridge 裡 push 失敗的處理）。
+        if (du->fullLength < 0 || du->fullLength > kMaxPacketBufferBytes) {
+            return DR_OK;
+        }
         if (m_VrTracker) {
             m_VrTracker->onSubmit(du);
         }
@@ -5444,7 +5462,7 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
     // av_buffer_pool_init 的大小是 int。needed + 25% 溢位就不要配。
     // §REVIEW-1119：只擋有號溢位的話，單幀仍可到約 1.7GB。pool 被拉上去之後，
     // av_buffer_pool_get 失敗也不會縮回來，後面的正常幀一直向同一塊要不到的大小要緩衝區。
-    const int64_t kMaxPacketBufferBytes = 64ll * 1024 * 1024;
+    // §REVIEW-1127 qt_stream #1：上限改用檔案層級的 kMaxPacketBufferBytes（PyroWave 分支共用）
     if (needed64 <= 0 || needed64 > kMaxPacketBufferBytes ||
             needed64 > 0x7fffffffLL - needed64 / 4) {
         return DR_NEED_IDR;

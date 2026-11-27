@@ -162,13 +162,17 @@ void BridgeDrCleanup(void) {
 // §PERF-1113：DecodedFrameBuffer 不夠大時一次至少長 1.5 倍。原本只長到「剛好這一幀」，碼率往上爬
 // （ABR 升碼率、畫面變複雜）的過程會一再配新的大陣列、丟舊的。順便釋放 local ref：這條是 native
 // 附掛的執行緒，local ref 要到 detach 才會回收。
-static void EnsureDecodedFrameBufferCapacity(JNIEnv* env, int needed) {
+// §REVIEW-1127 android #8：改回傳 bool。配不到時原本會帶著未清的 OutOfMemoryError 呼叫
+// DeleteGlobalRef／NewGlobalRef(NULL)，把 DecodedFrameBuffer 設成 NULL，之後每幀都崩潰；
+// 現在清掉例外、保留舊 buffer、回傳 false，由呼叫端丟掉這一幀。
+static bool EnsureDecodedFrameBufferCapacity(JNIEnv* env, int needed) {
     jsize curLen = (*env)->GetArrayLength(env, DecodedFrameBuffer);
     jsize newLen;
     jbyteArray newArray;
+    jobject newGlobal;
 
     if (curLen >= needed) {
-        return;
+        return true;
     }
 
     newLen = curLen + curLen / 2;
@@ -182,12 +186,23 @@ static void EnsureDecodedFrameBufferCapacity(JNIEnv* env, int needed) {
         (*env)->ExceptionClear(env);
         newArray = (*env)->NewByteArray(env, needed);
     }
+    if (newArray == NULL) {
+        (*env)->ExceptionClear(env);
+        __android_log_print(ANDROID_LOG_WARN, "moonlight-common-c",
+                            "[VIPLE-JNI] DecodedFrameBuffer grow to %d failed; dropping frame", needed);
+        return false;
+    }
+
+    newGlobal = (*env)->NewGlobalRef(env, newArray);
+    (*env)->DeleteLocalRef(env, newArray);
+    if (newGlobal == NULL) {
+        (*env)->ExceptionClear(env);
+        return false;
+    }
 
     (*env)->DeleteGlobalRef(env, DecodedFrameBuffer);
-    DecodedFrameBuffer = (*env)->NewGlobalRef(env, newArray);
-    if (newArray != NULL) {
-        (*env)->DeleteLocalRef(env, newArray);
-    }
+    DecodedFrameBuffer = newGlobal;
+    return true;
 }
 
 int BridgeDrSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
@@ -204,7 +219,10 @@ int BridgeDrSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
     // §PERF-1113：PyroWave 不用這份陣列裝影像資料（見下面 PICDATA 分支），不必跟著幀大小長大；
     // 它若有非 PICDATA 的區段，在該分支依區段長度另外確保容量。
     if (!DecoderIsPyroWave) {
-        EnsureDecodedFrameBufferCapacity(env, decodeUnit->fullLength);
+        // §REVIEW-1127 android #8：配不到就丟這一幀並要 IDR
+        if (!EnsureDecodedFrameBufferCapacity(env, decodeUnit->fullLength)) {
+            return DR_NEED_IDR;
+        }
     }
 
     PLENTRY currentEntry;
@@ -217,8 +235,10 @@ int BridgeDrSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
         if (currentEntry->bufferType != BUFFER_TYPE_PICDATA) {
             // Use the beginning of the buffer each time since this is a separate
             // invocation of the decoder each time.
-            if (DecoderIsPyroWave) {
-                EnsureDecodedFrameBufferCapacity(env, currentEntry->length);
+            if (DecoderIsPyroWave &&
+                    !EnsureDecodedFrameBufferCapacity(env, currentEntry->length)) {
+                // §REVIEW-1127 android #8：配不到就丟這一幀並要 IDR
+                return DR_NEED_IDR;
             }
             (*env)->SetByteArrayRegion(env, DecodedFrameBuffer, 0, currentEntry->length, (jbyte*)currentEntry->data);
 
@@ -618,13 +638,29 @@ Java_com_limelight_nvstream_jni_MoonBridge_startConnection(JNIEnv *env, jclass c
                             vrFlags);
     }
 
-    jbyte* riAesKeyBuf = (*env)->GetByteArrayElements(env, riAesKey, NULL);
-    memcpy(streamConfig.remoteInputAesKey, riAesKeyBuf, sizeof(streamConfig.remoteInputAesKey));
-    (*env)->ReleaseByteArrayElements(env, riAesKey, riAesKeyBuf, JNI_ABORT);
+    // §REVIEW-1127 android #16：金鑰／IV 至少要有 remoteInputAesKey／Iv 的長度（16 bytes），
+    // 否則 memcpy 會讀出陣列範圍。正常呼叫端（NvConnection 的 AES KeyGenerator）一定是 16 bytes。
+    if (riAesKey == NULL || riAesIv == NULL ||
+            (*env)->GetArrayLength(env, riAesKey) < (jsize)sizeof(streamConfig.remoteInputAesKey) ||
+            (*env)->GetArrayLength(env, riAesIv) < (jsize)sizeof(streamConfig.remoteInputAesIv)) {
+        __android_log_print(ANDROID_LOG_ERROR, "moonlight-common-c",
+                            "[VIPLE-JNI] startConnection: invalid riAesKey/riAesIv");
+        (*env)->ReleaseStringUTFChars(env, address, serverInfo.address);
+        (*env)->ReleaseStringUTFChars(env, appVersion, serverInfo.serverInfoAppVersion);
+        if (gfeVersion != NULL) {
+            (*env)->ReleaseStringUTFChars(env, gfeVersion, serverInfo.serverInfoGfeVersion);
+        }
+        if (rtspSessionUrl != NULL) {
+            (*env)->ReleaseStringUTFChars(env, rtspSessionUrl, serverInfo.rtspSessionUrl);
+        }
+        return -1;
+    }
 
-    jbyte* riAesIvBuf = (*env)->GetByteArrayElements(env, riAesIv, NULL);
-    memcpy(streamConfig.remoteInputAesIv, riAesIvBuf, sizeof(streamConfig.remoteInputAesIv));
-    (*env)->ReleaseByteArrayElements(env, riAesIv, riAesIvBuf, JNI_ABORT);
+    // 長度已在上面確認，直接複製前 16 bytes（GetByteArrayRegion 不會回 NULL 指標）
+    (*env)->GetByteArrayRegion(env, riAesKey, 0, (jsize)sizeof(streamConfig.remoteInputAesKey),
+                               (jbyte*)streamConfig.remoteInputAesKey);
+    (*env)->GetByteArrayRegion(env, riAesIv, 0, (jsize)sizeof(streamConfig.remoteInputAesIv),
+                               (jbyte*)streamConfig.remoteInputAesIv);
 
     BridgeVideoRendererCallbacks.capabilities = videoCapabilities;
 
@@ -725,12 +761,37 @@ Java_com_limelight_nvstream_jni_MoonBridge_setNetInterfaces(JNIEnv *env, jclass 
                                                              jintArray families,
                                                              jobjectArray addrs) {
 #ifdef VIPLE_MPQUIC
+    // §REVIEW-1127 android #16：四個陣列必須都在且等長，否則 typeArr[i]／familyArr[i]／addrs[i]
+    // 會越界。唯一的呼叫端（NvConnection）一定給等長陣列，這裡只是加固。
+    if (names == NULL || types == NULL || families == NULL || addrs == NULL) {
+        __android_log_print(ANDROID_LOG_WARN, "moonlight-common-c",
+                            "[VIPLE-MPQUIC] setNetInterfaces: null array, ignored");
+        return;
+    }
     int count = (*env)->GetArrayLength(env, names);
+    if ((*env)->GetArrayLength(env, types) != count ||
+            (*env)->GetArrayLength(env, families) != count ||
+            (*env)->GetArrayLength(env, addrs) != count) {
+        __android_log_print(ANDROID_LOG_WARN, "moonlight-common-c",
+                            "[VIPLE-MPQUIC] setNetInterfaces: array length mismatch, ignored");
+        return;
+    }
     if (count > LC_NETIF_MAX_COUNT)
         count = LC_NETIF_MAX_COUNT;
 
     jint *typeArr = (*env)->GetIntArrayElements(env, types, NULL);
     jint *familyArr = (*env)->GetIntArrayElements(env, families, NULL);
+    if (typeArr == NULL || familyArr == NULL) {
+        // §REVIEW-1127 android #16：取不到元素（OOM）時不能解參照
+        (*env)->ExceptionClear(env);
+        if (typeArr != NULL) {
+            (*env)->ReleaseIntArrayElements(env, types, typeArr, JNI_ABORT);
+        }
+        if (familyArr != NULL) {
+            (*env)->ReleaseIntArrayElements(env, families, familyArr, JNI_ABORT);
+        }
+        return;
+    }
 
     LC_NET_INTERFACE interfaces[LC_NETIF_MAX_COUNT];
     memset(interfaces, 0, sizeof(interfaces));
@@ -738,9 +799,15 @@ Java_com_limelight_nvstream_jni_MoonBridge_setNetInterfaces(JNIEnv *env, jclass 
     for (int i = 0; i < count; i++) {
         // Name
         jstring jname = (jstring)(*env)->GetObjectArrayElement(env, names, i);
-        const char *nameStr = (*env)->GetStringUTFChars(env, jname, NULL);
-        strncpy(interfaces[i].name, nameStr, LC_NETIF_MAX_NAME - 1);
-        (*env)->ReleaseStringUTFChars(env, jname, nameStr);
+        // §REVIEW-1127 android #16：元素是 null 時名稱留空，不呼叫 GetStringUTFChars(NULL)
+        if (jname != NULL) {
+            const char *nameStr = (*env)->GetStringUTFChars(env, jname, NULL);
+            if (nameStr != NULL) {
+                strncpy(interfaces[i].name, nameStr, LC_NETIF_MAX_NAME - 1);
+                (*env)->ReleaseStringUTFChars(env, jname, nameStr);
+            }
+            (*env)->DeleteLocalRef(env, jname);
+        }
 
         // Type (map Android NetworkCapabilities.TRANSPORT_* to LC_NETIF_TYPE_*)
         switch (typeArr[i]) {
@@ -763,8 +830,17 @@ Java_com_limelight_nvstream_jni_MoonBridge_setNetInterfaces(JNIEnv *env, jclass 
 
         // Raw address bytes → sockaddr_storage
         jbyteArray addrBytes = (jbyteArray)(*env)->GetObjectArrayElement(env, addrs, i);
+        if (addrBytes == NULL) {
+            // §REVIEW-1127 android #16：沒有位址就跟「位址長度不夠」一樣，addrLen 留 0
+            continue;
+        }
         jint addrLen = (*env)->GetArrayLength(env, addrBytes);
         jbyte *addrBuf = (*env)->GetByteArrayElements(env, addrBytes, NULL);
+        if (addrBuf == NULL) {
+            (*env)->ExceptionClear(env);
+            (*env)->DeleteLocalRef(env, addrBytes);
+            continue;
+        }
 
         if (familyArr[i] == AF_INET && addrLen >= 4) {
             struct sockaddr_in *sin = (struct sockaddr_in *)&interfaces[i].addr;
@@ -779,6 +855,7 @@ Java_com_limelight_nvstream_jni_MoonBridge_setNetInterfaces(JNIEnv *env, jclass 
         }
 
         (*env)->ReleaseByteArrayElements(env, addrBytes, addrBuf, JNI_ABORT);
+        (*env)->DeleteLocalRef(env, addrBytes);
     }
 
     (*env)->ReleaseIntArrayElements(env, types, typeArr, JNI_ABORT);

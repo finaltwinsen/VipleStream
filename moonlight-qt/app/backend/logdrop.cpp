@@ -650,6 +650,12 @@ QStringList collectSecrets()
     if (!user.isEmpty() && user.compare(userName, Qt::CaseInsensitive) != 0) {
         secrets.append(user);
     }
+    // §REVIEW-1127 qt_ui #13：設定檔目錄的名稱可能和 USERNAME 不同（改過帳號名稱、Microsoft 帳號）
+    const QString homeName = QDir::home().dirName();
+    if (!homeName.isEmpty() && homeName.compare(userName, Qt::CaseInsensitive) != 0 &&
+            homeName.compare(user, Qt::CaseInsensitive) != 0) {
+        secrets.append(homeName);
+    }
     return secrets;
 }
 
