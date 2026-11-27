@@ -665,11 +665,12 @@ namespace vr::multilink {
 
   /**
    * @brief 連線層功能的協商：client 提出的（每條連線的 flags 取交集）裡，server 的開關也開的才啟用。
-   *        REPAIR 要 CTRL 成立，REPAIR_RTT 要 REPAIR 成立；HOTADD 獨立（不依賴 CTRL／REPAIR）。不認得的位元一律不回。
+   *        REPAIR 要 CTRL 成立，REPAIR_RTT 要 REPAIR 成立；HOTADD 與 GAME_MV 獨立（不依賴 CTRL／REPAIR）。不認得的位元一律不回。
    *        §VR-REPAIR-WAN：repair_rtt 關著、repair_far 開著（預設）時，client 有提 REPAIR_FAR 才給 REPAIR_RTT｜REPAIR_FAR
    *        （RTT 規則只用在原本規則不補的路徑上）；沒提 REPAIR_FAR 的舊 client 照舊拿不到 REPAIR_RTT。
+   *        §VR-GAME-MV：game_mv 開著時，client 有提 F_GAME_MV 且非平面（2D）場次才給 F_GAME_MV。
    */
-  inline uint8_t negotiate_link_features(uint8_t offered, bool ctrl, bool repair, bool repair_rtt, bool hotadd, bool repair_far = false, bool flat_repair = false) {
+  inline uint8_t negotiate_link_features(uint8_t offered, bool ctrl, bool repair, bool repair_rtt, bool hotadd, bool repair_far = false, bool flat_repair = false, bool game_mv = false) {
     uint8_t feat = 0;
     if (hotadd && (offered & VIPLE_VR_LINK_F_HOTADD)) {
       feat |= VIPLE_VR_LINK_F_HOTADD;
@@ -683,6 +684,9 @@ namespace vr::multilink {
         feat |= need;
       }
       return feat;
+    }
+    if (game_mv && (offered & VIPLE_VR_LINK_F_GAME_MV)) {
+      feat |= VIPLE_VR_LINK_F_GAME_MV;
     }
     if (ctrl && (offered & VIPLE_VR_LINK_F_CTRL)) {
       feat |= VIPLE_VR_LINK_F_CTRL;

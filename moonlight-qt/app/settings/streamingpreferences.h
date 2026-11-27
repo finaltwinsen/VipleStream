@@ -531,6 +531,9 @@ public:
     int  vrFoveaTiles = 1;
     int  vrFoveation = 200;           // §VR-FOVEA（2.0.30 起預設 200）：--vr-foveation，正前方的像素密度（%，100＝關）；寫入設定（vrfoveation）
     bool vrSynth = false;             // §VR-SYNTH：--vr-synth，半速串流時合成中間那一格；寫入設定（vrsynth）
+    // §VR-GAME-MV（M-MV2）：0＝--vr-game-mv off 一律不用、1＝auto（預設）＝補幀開著就向 host 要遊戲內動態向量。
+    // 只由命令列設定，不寫入設定檔（host 端另有 vr_game_mv）
+    int  vrGameMv = 1;
     // §VR-WHEEL（2026-11-05）：Xbox 手把模式時，兩支手把像握方向盤一樣轉動＝左搖桿 X。串流中兩支搖桿同時按住 1.5 秒切換，
     // 切換結果也寫回這裡（vrwheel）。vrWheelRange＝左打到底到右打到底的總角度（度，90–900，vrwheelrange）
     bool vrWheel = false;

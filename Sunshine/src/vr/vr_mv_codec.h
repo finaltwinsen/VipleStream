@@ -133,7 +133,8 @@ namespace vr::mv_codec {
     size_t payload_bytes,
     int16_t *out_vx,
     int16_t *out_vy,
-    uint8_t *out_depth = nullptr
+    uint8_t *out_depth = nullptr,
+    float mv_gain = 1.0f  ///< 位移乘上的倍數（server 用來換算成「每個串流幀」的位移；見 display_vr 的 §VR-GAME-MV-GAIN）
   ) noexcept;
 
   /**
@@ -171,7 +172,8 @@ namespace vr::mv_codec {
     const void *rgba16f_payload,
     size_t payload_bytes,
     std::vector<uint8_t> &out_compressed,
-    std::vector<uint8_t> *scratch_planar = nullptr
+    std::vector<uint8_t> *scratch_planar = nullptr,
+    float mv_gain = 1.0f
   );
 
   /**

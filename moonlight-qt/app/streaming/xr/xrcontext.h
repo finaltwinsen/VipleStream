@@ -131,6 +131,9 @@ public:
         bool pcvrTrackRelock = false;
         // 2026-10-08（§VR-SYNTH）：PCVR 半速串流時，沒有新影像的那一格顯示合成影像（見 XrVideo::renderSynth）
         bool pcvrSynth = false;
+        // §VR-GAME-MV（M-MV2）：合成那一格改用 host 送來的遊戲內動態向量與深度（--vr-game-mv off 關掉）。
+        // 只跟著 pcvrSynth 生效；關著時整條路徑（ring 查詢、貼圖、shader）都不執行
+        bool pcvrGameMv = false;
         // 2026-10-08（§VR-LATCH-RELATCH）：xrEndFrame 之前再確認一次。frame thread 挑完影像之後、xrEndFrame 之前影像
         // render thread 又 release 了一張的話，runtime 顯示的是新的那一張、projection 的姿態卻是舊的（錯配一幀，
         // 原本只計數）；開著就把這一格的 projection 改用新影像自己的姿態。這個空窗只有幾十微秒，救的就是這幾次，

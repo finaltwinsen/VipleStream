@@ -1172,6 +1172,22 @@ int LiVrLinkOnDedicated(void);
 // 的可靠傳輸；false 走 VR channel UNSEQUENCED。回傳 0 表示已送出。
 int LiSendVrMessage(const uint8_t* tlv, int length, bool reliable);
 
+// ── §VR-GAME-MV（2026-11-27，docs/specs/vr_game_motion_vectors.md §8）────────────────
+// server 把遊戲內的動態向量與深度（vr_mv_codec v2 壓縮流，開頭 12 B 是 codec 標頭）切塊、AES-GCM 加密後
+// 經每條多連線的影像 socket 送來（VIPLE_VR_LINK_T_MV）。頭盔端湊齊一幀就呼叫下面註冊的 sink。
+//
+// sink 在影像接收執行緒上呼叫，**必須很快**（microseconds 級）：app 自己把資料複製出去、丟到別的執行緒解壓。
+// data 只在呼叫期間有效；len＝整幀壓縮流長度；frameStep＝跨越的遊戲幀數 K_step（1..4）。
+// 沒有多連線、沒有協商 F_GAME_MV、或 sink 為 NULL 時永遠不會被呼叫。
+typedef void (*LiVrGameMvSink)(uint32_t videoFrameIndex, uint8_t frameStep, const uint8_t* data, uint32_t len, void* ctx);
+
+// 設定 sink。要在開始連線之前呼叫：非 NULL 表示這一場會用到，LINK_HELLO 才會提出 F_GAME_MV；NULL 可關掉。
+// 舊 server 不認得這個位元，行為完全不變。
+void LiSetVrGameMvSink(LiVrGameMvSink sink, void* ctx);
+
+// server 在 LINK_READY 的 hubCaps 同意了 F_GAME_MV 才回 1（多連線協商完成之前、或沒提出時是 0）。可從任何執行緒呼叫。
+int LiVrGameMvNegotiated(void);
+
 // §HOTSPOT-FLAT：場次中途才知道的 server 位址（例：host 的無線網卡這時才連上頭盔熱點）加進 MP-QUIC 的 alt peer。
 // 已經有就不動；路徑由復原執行緒下一輪探測時建立（以待命路徑加入）。沒有編 MP-QUIC、這一場沒開 QUIC 時什麼都不做
 void LiAddQuicAltPeer(const char* ipv4);

@@ -65,6 +65,7 @@ extern "C" {
 #include "vr/vr_abr_outage.h"
 #include "vr/vr_abr_fast.h"
 #include "vr/vr_fec_spread.h"
+#include "vr/vr_game_mv_job.h"
 #include "vr/vr_predict.h"
 #include "vr/vr_session.h"
 #ifdef _WIN32
@@ -2162,11 +2163,10 @@ namespace stream {
       std::string ssid(reinterpret_cast<const char *>(hotspot.ssid), hotspot.ssidLen);
       std::string key(reinterpret_cast<const char *>(hotspot.key), hotspot.keyLen);
 
-      // 安全鐵律：log 只能印 SSID 的前 3 個字元＋***、金鑰長度
-      std::string ssid_prefix = ssid.substr(0, std::min<std::size_t>(3, ssid.size()));
+      // 安全鐵律：log 只印 SSID 長度、金鑰長度（§LOGDROP-NAME 11-27：原本的前 3 個字元已足以辨識家用網路，拿掉）
       const char *band_name = (hotspot.band == VIPLE_VR_HOTSPOT_BAND_6GHZ || hotspot.band == 0) ? "6GHz" :
                               (hotspot.band == VIPLE_VR_HOTSPOT_BAND_5GHZ) ? "5GHz" : "2.4GHz";
-      BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] received ssid=" << ssid_prefix << "*** keylen=" << (int) hotspot.keyLen << " band=" << band_name;
+      BOOST_LOG(info) << "[VIPLE-VR-HOTSPOT] received ssidlen=" << ssid.size() << " keylen=" << (int) hotspot.keyLen << " band=" << band_name;
 
       if (config::vr.hotspot_autoconnect && session->tsPathGen != 0) {
         // 11-04：client 經 Tailscale 連進來（人在外面）時頭盔熱點不在附近，連了也連不上，
@@ -6938,6 +6938,24 @@ namespace stream {
         });
 
         session->video.lowseq = lowseq;
+
+        // §VR-GAME-MV（M-MV2）：這一幀影像封包送完後，若附帶了遊戲內 MV 且 hub 協商了 F_GAME_MV，
+        // 等待壓縮工作最多 2 ms；完成且非空就切塊加密送出，逾時或失敗計數 notReady。每 10 秒印一次 [VIPLE-VR-MV-TX]。
+        if (vr_links && (vr_links->features() & VIPLE_VR_LINK_F_GAME_MV)) {
+          if (packet->vr_meta.game_mv) {
+            if (packet->vr_meta.game_mv->wait_ready(2ms) && !packet->vr_meta.game_mv->compressed.empty()) {
+              const auto &comp = packet->vr_meta.game_mv->compressed;
+              vr_links->send_mv(
+                (uint32_t) packet->frame_index(),
+                packet->vr_meta.game_mv_meta.k_step,
+                std::string_view {(const char *) comp.data(), comp.size()}
+              );
+            } else {
+              vr_links->note_mv_not_ready();
+            }
+          }
+          vr_links->maybe_log_mv_tx();
+        }
       } catch (const std::exception &e) {
         BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
         std::this_thread::sleep_for(100ms);
@@ -8161,6 +8179,10 @@ namespace stream {
           }
           // §VR-MULTILINK-HOTADD：串流中途插上適配器／主機後連熱點（client 也要支援才會啟用）
           opt.hotadd = config::vr.multilink_hotadd;
+#ifdef _WIN32
+          // §VR-GAME-MV：Windows 且設定未關閉時，若 client 也在 LINK_HELLO 提出 F_GAME_MV，則在 hubCaps 同意啟用
+          opt.game_mv = config::vr.game_mv != config::vr_t::game_mv_e::disabled;
+#endif
           opt.video_uso = config::vr.multilink_uso;  // §PERF-1113：預設關
           opt.pace_spread_pct = std::max(config::vr.pace_spread_pct, 0);  // §VR-PACE：auto（−1）從「一次送完」開始，之後由 10 秒統計決定
           if (config::vr.pace_spread_pct < 0) {

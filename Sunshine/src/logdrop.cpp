@@ -2,6 +2,7 @@
  * @file src/logdrop.cpp
  * @brief §LOGDROP：遮罩與上傳。遮罩用單向掃描，不用巢狀量詞的 regex（log 可能數 MB）。
  */
+#include <cctype>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -466,6 +467,31 @@ namespace logdrop {
           }
           i = end;
           continue;
+        }
+        // §LOGDROP-NAME（2026-11-27）：配對裝置名稱也會出現在 owner=／prior_owner= 欄位。名稱另外會加進祕密字，
+        // 但不到 3 個字的名稱不能當祕密字（會把 log 裡所有同樣的兩個字母都遮掉），匿名 log 實測就這樣漏了。
+        // 所以這兩個欄位的值不論長短一律換掉（到空白為止）。
+        {
+          bool hit_key = false;
+          for (const std::string_view key : {std::string_view {"prior_owner="}, std::string_view {"owner="}}) {
+            const bool boundary = i == 0 || !(std::isalnum(static_cast<unsigned char>(text[i - 1])) || text[i - 1] == '_');
+            if (boundary && text.size() - i > key.size() && text.substr(i, key.size()) == key) {
+              std::size_t end = i + key.size();
+              while (end < text.size() && text[end] != ' ' && text[end] != '\n' && text[end] != '\r' && text[end] != '\t') {
+                ++end;
+              }
+              out.append(key);
+              if (end > i + key.size()) {
+                out += "<name>";
+              }
+              i = end;
+              hit_key = true;
+              break;
+            }
+          }
+          if (hit_key) {
+            continue;
+          }
         }
         std::string repl;
         if (const auto end = match_mac(text, i, repl)) {

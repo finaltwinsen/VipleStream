@@ -987,3 +987,54 @@ TEST(VrMultilinkHotadd, FeatureIsIndependent) {
   EXPECT_EQ(ml::negotiate_link_features(VIPLE_VR_LINK_F_HOTADD, true, true, true, false), 0x00);
   EXPECT_EQ(ml::negotiate_link_features(0x00, true, true, true, true), 0x00);
 }
+
+// ── §VR-GAME-MV（docs/specs/vr_game_motion_vectors.md §8）────────────
+
+TEST(VrMultilinkGameMv, FeatureIsIndependent) {
+  // GAME_MV 也不依賴 CTRL／REPAIR：server 的開關開著、client 有提才成立
+  EXPECT_EQ(ml::negotiate_link_features(VIPLE_VR_LINK_F_GAME_MV, false, false, false, false, false, false, true),
+            VIPLE_VR_LINK_F_GAME_MV);
+  EXPECT_EQ(ml::negotiate_link_features(VIPLE_VR_LINK_F_GAME_MV | VIPLE_VR_LINK_F_CTRL, true, false, false, false, false, false, true),
+            VIPLE_VR_LINK_F_GAME_MV | VIPLE_VR_LINK_F_CTRL);
+  // server 的 vr_game_mv = disabled、舊 client 沒提：都不回
+  EXPECT_EQ(ml::negotiate_link_features(VIPLE_VR_LINK_F_GAME_MV, true, true, true, true, false, false, false), 0x00);
+  EXPECT_EQ(ml::negotiate_link_features(0x00, true, true, true, true, false, false, true), 0x00);
+  // 平面（2D）場次只回補包三件組，不含 GAME_MV（§8.1：MV 只走 VR 多連線）
+  EXPECT_EQ(ml::negotiate_link_features(VIPLE_VR_LINK_F_GAME_MV | VIPLE_VR_LINK_F_CTRL | VIPLE_VR_LINK_F_REPAIR |
+                                          VIPLE_VR_LINK_F_REPAIR_FLAT, true, true, false, false, false, true, true),
+            VIPLE_VR_LINK_F_CTRL | VIPLE_VR_LINK_F_REPAIR | VIPLE_VR_LINK_F_REPAIR_FLAT);
+}
+
+TEST(VrMultilinkGameMv, ChunkLayout) {
+  const uint32_t chunkMax = VIPLE_VR_MV_CHUNK_MAX;
+  const uint32_t maxChunks = VIPLE_VR_MV_MAX_CHUNKS;
+  // 資料報版面：LINK_HDR(12) + tag(16) + CHUNK_HDR(16) + payload(CHUNK_MAX) == DGRAM_MAX（VipleVr.h 另有 STATIC_ASSERT）
+  EXPECT_EQ(sizeof(VIPLE_VR_MV_CHUNK_HDR), (size_t) 16);
+  EXPECT_EQ(sizeof(VIPLE_VR_LINK_HDR) + 16 + sizeof(VIPLE_VR_MV_CHUNK_HDR) + (size_t) chunkMax, (size_t) VIPLE_VR_MV_DGRAM_MAX);
+
+  // 切塊算式（server 的 hub_t::send_mv 與 client 的驗證都照這個）：第 i 塊在壓縮流中的位移固定是 i × CHUNK_MAX，
+  // 總塊數無條件進位；超過 MAX_CHUNKS 整幀不送。挑邊界值：剛好一塊、一塊多 1 byte、剛好 64 塊、64 塊多 1 byte。
+  const uint32_t lens[] = {
+    1u,
+    chunkMax,
+    chunkMax + 1u,
+    maxChunks * chunkMax,
+    maxChunks * chunkMax + 1u,
+  };
+  for (uint32_t len : lens) {
+    const uint32_t chunks = (len + chunkMax - 1u) / chunkMax;
+    const bool fits = chunks <= maxChunks;
+    EXPECT_EQ(fits, len <= maxChunks * chunkMax) << len;
+    if (!fits) {
+      continue;
+    }
+    // 每一塊的位移與長度都要落在整段之內；最後一塊允許短於 CHUNK_MAX
+    for (uint32_t i = 0; i < chunks; ++i) {
+      const uint32_t off = i * chunkMax;
+      const uint32_t n = len - off < chunkMax ? len - off : chunkMax;
+      EXPECT_GT(n, 0u) << len << " chunk " << i;
+      EXPECT_LE(off + n, len) << len << " chunk " << i;
+    }
+  }
+}
+

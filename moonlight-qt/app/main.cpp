@@ -167,6 +167,9 @@ static QRegularExpression k_RikeyIdRegex("([?&])rikeyid=[\\d-]+");
 static const uint64_t k_MaxLogSizeBytes = 10 * 1024 * 1024;
 static QAtomicInteger<uint64_t> s_LogBytesWritten = 0;
 static QFile* s_LoggerFile;
+// §LOGDROP-LINUX（2026-11-27）：log 檔的路徑另外記一份。Unix 是用 ::open 拿 fd 再 QFile::open(fd) 開的，
+// 匿名 log 實測 Linux client 的上傳全是「log unavailable」——不靠 QFile::fileName() 取路徑
+static QString s_LoggerFilePath;
 #endif
 // §PERF-1113（A28）：非同步模式已入列、還沒寫完的量（估計值，見 LoggerTask::markQueued）。s_LogBytesWritten 改由寫入端
 // 累加之後，handler 入口要連這個一起看，log 執行緒落後或卡住時佇列才有上限（只有 LOG_TO_FILE 會讀）
@@ -716,7 +719,7 @@ QString vipleCurrentLogFilePath()
 #ifdef LOG_TO_FILE
     QMutexLocker locker(&s_SyncLoggerMutex);
     if (s_LoggerFile != nullptr && s_LoggerFile->isOpen()) {
-        return s_LoggerFile->fileName();
+        return s_LoggerFilePath.isEmpty() ? s_LoggerFile->fileName() : s_LoggerFilePath;
     }
 #endif
     return QString();
@@ -1143,7 +1146,8 @@ int main(int argc, char *argv[])
         logOpened = s_LoggerFile->open(QIODevice::WriteOnly | QIODevice::Text);
 #endif
         if (logOpened) {
-            QTextStream(stderr) << "Redirecting log output to " << s_LoggerFile->fileName() << Qt::endl;
+            s_LoggerFilePath = logPath;
+            QTextStream(stderr) << "Redirecting log output to " << logPath << Qt::endl;
             s_LoggerStream.setDevice(s_LoggerFile);
         }
     }

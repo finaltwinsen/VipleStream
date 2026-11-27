@@ -484,6 +484,8 @@ bool XrContext::bringUp(int timeoutMs, QString* error)
         vc.testStallMs = m_Options.testStallMs;
         vc.requireMeta = m_Options.pcvr;  // M4a R4：PCVR 不發布無 render pose 的影像
         vc.synth = m_Options.pcvr && m_Options.pcvrSynth;  // §VR-SYNTH
+        // §VR-GAME-MV（M-MV2）：只有補幀開著才需要外部 MV；關著時 XrVideo 連 ring 都不查（零成本）
+        vc.gameMv = m_Options.pcvrSynth && m_Options.pcvrGameMv;
         vc.buffer = m_Options.pcvr && !vc.synth ? m_Options.pcvrBufferFrames : 0;  // §VR-BUFFER：和補幀互斥（都用 swapchain 的配置）
         vc.bufferAuto = vc.buffer > 1 && m_Options.pcvrBufferAuto;                    // §VR-BUFFER-AUTO
         vc.testJitter = m_Options.testJitter;

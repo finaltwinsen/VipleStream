@@ -563,7 +563,12 @@ namespace platf::dxgi {
     struct mvdump_t;
     struct mv_encoder_t;
     uint64_t last_matched_mv_frame_id_ = 0;  ///< 上一張實際送進編碼器的影像配對到的 mv_frame_id
-    std::shared_ptr<mv_encoder_t> mv_encoder_;  ///< 量化＋壓縮的背景執行緒（第一次配對命中才建）
+    std::shared_ptr<mv_encoder_t> mv_encoder_;
+    int64_t mv_last_encoded_present_ = 0;  ///< §VR-GAME-MV-GAIN：上一張送進編碼器的 driver present_qpc
+    double mv_stream_period_ = 0.0;  ///< 串流幀週期（QPC tick，移動平均）
+    double mv_game_period_ = 0.0;  ///< 遊戲幀週期（QPC tick，移動平均）
+    uint64_t mv_last_gain_frame_id_ = 0;
+    int64_t mv_last_gain_present_ = 0;  ///< 量化＋壓縮的背景執行緒（第一次配對命中才建）
     std::shared_ptr<mv_window_stats_t> mv_window_;  ///< 10 秒統計視窗
     std::shared_ptr<mvdump_t> mvdump_;  ///< vr_dev_mvdump 背景寫檔佇列（未啟用時為 nullptr）
   };

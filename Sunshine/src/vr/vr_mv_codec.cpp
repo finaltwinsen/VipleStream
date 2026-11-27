@@ -138,9 +138,10 @@ namespace vr::mv_codec {
     size_t payload_bytes,
     int16_t *out_vx,
     int16_t *out_vy,
-    uint8_t *out_depth
+    uint8_t *out_depth,
+    float mv_gain
   ) noexcept {
-    if (!rgba16f_payload || !out_vx || !out_vy) {
+    if (!rgba16f_payload || !out_vx || !out_vy || !std::isfinite(mv_gain)) {
       return false;
     }
     uint16_t ow = 0, oh = 0;
@@ -162,7 +163,7 @@ namespace vr::mv_codec {
     }
 
     // 單眼 UV → SBS UV（x × 0.5）→ × 2^k_uv_scale_log2
-    const float scale = static_cast<float>(1u << k_uv_scale_log2);
+    const float scale = static_cast<float>(1u << k_uv_scale_log2) * mv_gain;  // mv_gain：換算成「每個串流幀」的位移
     const float factor_x = (desc.mv_units == VRMV_UNITS_EYE_UV) ?
                              (0.5f * scale) :
                              ((0.5f * desc.mv_scale[0] / static_cast<float>(desc.mv_tex_w)) * scale);
@@ -325,7 +326,8 @@ namespace vr::mv_codec {
     const void *rgba16f_payload,
     size_t payload_bytes,
     std::vector<uint8_t> &out_compressed,
-    std::vector<uint8_t> *scratch_planar
+    std::vector<uint8_t> *scratch_planar,
+    float mv_gain
   ) {
     uint16_t ow = 0, oh = 0;
     if (!rgba16f_payload || !output_grid_dims(desc, ow, oh)) {
@@ -341,7 +343,7 @@ namespace vr::mv_codec {
     if (has_depth) {
       dz.resize(n);
     }
-    if (!quantize_rgba16f_to_planes(desc, rgba16f_payload, payload_bytes, vx.data(), vy.data(), has_depth ? dz.data() : nullptr)) {
+    if (!quantize_rgba16f_to_planes(desc, rgba16f_payload, payload_bytes, vx.data(), vy.data(), has_depth ? dz.data() : nullptr, mv_gain)) {
       return false;
     }
     uint8_t codec_flags = 0;

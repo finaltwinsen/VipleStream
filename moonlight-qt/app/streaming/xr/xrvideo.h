@@ -35,6 +35,7 @@
 #include "xrlatchstats.h"  // §VR-LDIAG：xrlatch::Jitter（dev 的到達抖動注入）
 #include "xrvideostats.h"  // §VR-XRLOOP／§VR-PASS：RenderDiag（10s video 行尾那幾欄）、PassStats（header-only）
 #include "streaming/video/ffmpeg-renderers/plvk_common.h"  // §SF-DMABUF-CACHE：DrmTexCache
+#include "streaming/vr/vrgamemv.h"  // §VR-GAME-MV：外部遊戲 MV 的環（vrgamemv::Frame）
 
 #include <QImage>
 #include <QString>
@@ -79,6 +80,9 @@ public:
         bool requireMeta = false;
         // §VR-SYNTH：合成中間格（只在 PCVR 半速串流時開）。swapchain 高度加倍，下半是合成影像
         bool synth = false;
+        // §VR-GAME-MV（M-MV2）：合成那一格改用遊戲自己的動態向量與深度（host 有送時），拿不到或不可信就
+        // 原封不動退回 synthFlow 的區塊比對。只在 synth 開著時有意義；關著時整條路徑（含 ring 查詢）都不執行
+        bool gameMv = false;
         // §VR-LDIAG（dev，--vr-test-jitter）：畫每一張串流影像之前照這個字串延後（xrlatch::Jitter 的格式），空字串＝不注入
         QString testJitter;
         // §VR-LATCH-RELATCH：xrReleaseSwapchainImage 與發布放進同一段 queue 鎖。frame thread 在 queue 鎖內看到
@@ -377,6 +381,18 @@ private:
     // grayThumbs＝縮圖三個通道同值（分塊版從亮度平面縮的），比對時只讀一個通道
     bool synthFlow(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, float fv[4], float fvCyR, float fvU0,
                    bool grayThumbs);
+    // §VR-GAME-MV（M-MV2）：合成那一格的位移場。先試外部遊戲 MV（§5.3 的閘門，通過才用），不成立就退回 synthFlow。
+    // 回傳 true＝m_Flow 可以用（外部 MV 或區塊比對算出來的都算）。
+    bool synthFlowForFrame(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, float fv[4],
+                           float fvCyR, float fvU0, bool grayThumbs);
+    // 兩張編碼幀之間能不能外插：連續幀（§5.3 F3）與轉頭角度（F4）。會更新 m_NominalDelta（和原本 synthFlow 同一段）。
+    enum class PairVerdict { Ok, NotConsecutive, HeadTurn };
+    PairVerdict synthPair(bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, float d[4]);
+    // §VR-GAME-MV：用 m_ExtMvFrameIndex 查環（已經查到就不做事）。renderNewFrame 查一次，合成前再查一次接晚到的
+    void extMvTryLookup();
+    // 把 m_CurExtMv 上傳成貼圖、跑 kExtFlowBody 寫進 m_Flow。d＝q_prev⁻¹·q_cur（synthPair 算好的）；
+    // 失敗時 *fail 帶回是上傳還是 shader（統計用）
+    bool extFlowToTexture(const float d[4], const float fv[4], float fvCyR, float fvU0, vrgamemv::Fallback* fail);
     bool ensureFull(int fw, int fh);
     // fv＝(a, cxL, cxR, cyL)（shader 的 vec4 vs_fv）、*cyR＝右眼的垂直中心（shader 的 float vs_cyr）
     void loadFoveation(float fv[4], float* cyR, float* u0) const;
@@ -390,7 +406,8 @@ private:
     QImage readbackTexture(pl_tex tex, bool forceRgba = false);
     void saveDump(const QImage& img, const QString& path, int srcW, int srcH);
     // dev（--xr-dump-frame，補幀開著時）：把這一張估位移用到的東西也存下來——上一張與這一張的 1/8 縮圖（PNG）和位移場
-    // （原始資料：寬×高×4 個 float16，xy＝剩餘位移（UV，上一張的位置 − 這一張的位置）、z＝比對成本）。存下來的那一組
+    // （原始資料：寬×高×4 個 float16，xy＝剩餘位移（UV，上一張的位置 − 這一張的位置）、z＝比對成本；§VR-GAME-MV 用外部
+    // 遊戲 MV 的那一張 z＝正規化逆深度、w＝2.0（區塊比對是 1.0），存下來的那一組
     // 影像只看得出「合成的那一張和真的差在哪」，看不出在動的東西是不是往對的方向、推了對的距離；有這三個檔才能離線核對。
     void dumpSynthInputs(const QString& prevPath, const QString& curPath, const QString& flowPath);
     void renderThreadMain();
@@ -411,6 +428,18 @@ private:
     pl_tex m_Full = nullptr;         // 這一張的 RGB（和寫進 swapchain 的值相同）
     pl_tex m_Small[2] = {};          // 1/8 尺寸，這一張與上一張（輪流）
     pl_tex m_Flow = nullptr;         // 1/8 尺寸的位移場（UV 單位）
+    // §VR-GAME-MV（M-MV2，都只在影像 render thread 用）
+    pl_tex m_ExtMvTex = nullptr;    // gridW×gridH RGBA16F：x/y＝SBS UV 位移、z＝正規化逆深度、w＝1
+    std::shared_ptr<const vrgamemv::Frame> m_CurExtMv;  // 這一張查到的外部 MV（renderNewFrame 查一次，這一張用完就換）
+    uint32_t m_ExtMvFrameIndex = 0;       // 這一張的 videoFrameIndex
+    bool m_HaveExtMvFrameIndex = false;   // 拿得到幀號嗎（PyroWave 等拿不到）
+    std::vector<uint16_t> m_ExtMvStage;   // 上傳用的 half 打包緩衝（每幀重填、重複使用）
+    uint64_t m_ExtMvLastHitMs = 0;        // 上一次查到外部 MV 的時刻（SDL_GetTicks64）
+    uint32_t m_ExtMvRun = 0;              // 連續可用的張數（§8.3 穩定期：滿 30 才採用）
+    uint16_t m_ExtMvGridW = 0, m_ExtMvGridH = 0;  // 上一次的網格（變了＝重新等穩定期）
+    uint8_t m_ExtMvStep = 0;              // 上一次的 frameStep（變了同樣重新等）
+    bool m_ExtMvFailed = false;           // 上傳或 shader 失敗過：這個 session 不再試
+    bool m_FlowExternal = false;          // 這一張的 m_Flow 是外部遊戲 MV 寫的（dump 的 log 用）
     pl_tex m_Mid[2] = {};            // 1/16 尺寸（位移估計的粗層），這一張與上一張
     pl_tex m_FlowC = nullptr;        // 1/16 尺寸的位移場（粗層的結果，給 1/8 那一層當起點）
     int m_SmallCur = 0;

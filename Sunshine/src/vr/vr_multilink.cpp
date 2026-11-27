@@ -166,6 +166,7 @@ namespace vr::multilink {
     std::atomic<uint64_t> audio_pkts {0}, audio_drop {0};
     std::atomic<uint64_t> rx_ping {0}, rx_data {0}, rx_dup {0}, rx_bad {0}, trk_first {0};
     std::atomic<uint64_t> rx_ctl {0}, s2c_tx {0}, s2c_drop {0};  // §VR-LINK-CTRL：收到的 0x5507、送出／送不出去的 T_S2C
+    std::atomic<uint64_t> mv_tx {0}, mv_drop {0};  // §VR-GAME-MV：這條連線送出／送不出去的 T_MV 分片
     std::atomic<uint64_t> repair_tx {0}, repair_drop {0};  // §VR-LINK-REPAIR：這條連線送出／來不及送的補包
     uint64_t repair_tx_prev = 0, repair_drop_prev = 0;  // 上一次統計時的值（只在 control 執行緒存取）
     std::atomic<uint32_t> repair_wait_max_us {0};  // 補包從排進佇列到開始送出，最久等了多久（10 s 統計）
@@ -180,7 +181,7 @@ namespace vr::multilink {
     struct prev_t {
       uint64_t tx_pkts = 0, tx_bytes = 0, drop_age = 0, drop_block = 0, drop_full = 0, drop_muted = 0, drop_policy = 0, drop_fault = 0, tx_err = 0;
       uint64_t audio_pkts = 0, audio_drop = 0, rx_ping = 0, rx_data = 0, rx_dup = 0, rx_bad = 0, trk_first = 0;
-      uint64_t rx_ctl = 0, s2c_tx = 0, s2c_drop = 0;
+      uint64_t rx_ctl = 0, s2c_tx = 0, s2c_drop = 0, mv_tx = 0, mv_drop = 0;
       uint32_t cl_rx_pkts = 0, cl_rx_used = 0;
     } prev;
   };
@@ -190,9 +191,11 @@ namespace vr::multilink {
         opt {std::move(o)},
         on_c2s {std::move(cb)},
         cipher {key, false},
-        s2c_cipher {key, false} {
+        s2c_cipher {key, false},
+        mv_cipher {key, false} {
       iv.resize(12);
       s2c_iv.resize(12);
+      mv_iv.resize(12);
     }
 
     options_t opt;
@@ -214,6 +217,25 @@ namespace vr::multilink {
     crypto::aes_t s2c_iv;
     uint32_t s2c_seq = 0;
     std::atomic<uint8_t> features {0};  // 協商出來的 VIPLE_VR_LINK_F_*
+
+    // §VR-GAME-MV：S→C 遊戲內動態向量分片（T_MV）的加密、序號與統計（握 mv_mtx；IV 尾端 'H','M'，與 T_S2C 的 'H','L' 分開）
+    std::mutex mv_mtx;
+    crypto::cipher::gcm_t mv_cipher;
+    crypto::aes_t mv_iv;
+    uint32_t mv_seq = 0;
+    std::atomic<uint64_t> mv_tx_frames {0};
+    std::atomic<uint64_t> mv_tx_chunks {0};
+    std::atomic<uint64_t> mv_tx_bytes {0};
+    std::atomic<uint64_t> mv_not_ready {0};
+    std::atomic<uint64_t> mv_too_big {0};
+    std::atomic<uint64_t> mv_sock_err {0};
+    clock::time_point mv_log_prev {};
+    uint64_t mv_tx_frames_prev = 0;
+    uint64_t mv_tx_chunks_prev = 0;
+    uint64_t mv_tx_bytes_prev = 0;
+    uint64_t mv_not_ready_prev = 0;
+    uint64_t mv_too_big_prev = 0;
+    uint64_t mv_sock_err_prev = 0;
 
     // §VR-LINK-REPAIR：封包倉（影像執行緒寫、接收執行緒讀）與額度（都握 store_mtx）
     mutable std::mutex store_mtx;
@@ -1121,16 +1143,18 @@ namespace vr::multilink {
       for (const auto &h : links) {
         offered &= h.flags;
       }
-      const uint8_t feat = negotiate_link_features(offered, m.opt.ctrl, m.opt.repair, m.opt.repair_rtt, m.opt.hotadd, m.opt.repair_far, m.opt.flat_repair);
+      const uint8_t feat = negotiate_link_features(offered, m.opt.ctrl, m.opt.repair, m.opt.repair_rtt, m.opt.hotadd, m.opt.repair_far, m.opt.flat_repair, m.opt.game_mv);
       if (m.features.exchange(feat, std::memory_order_relaxed) != feat || m.count.load(std::memory_order_relaxed) == 0) {
         BOOST_LOG(info) << "[VIPLE-VR-LINK] link features: ctrl=" << ((feat & VIPLE_VR_LINK_F_CTRL) ? "on" : "off")
                         << " repair=" << ((feat & VIPLE_VR_LINK_F_REPAIR) ? "on" : "off")
                         << " repairRtt=" << (!(feat & VIPLE_VR_LINK_F_REPAIR_RTT) ? "off" : (feat & VIPLE_VR_LINK_F_REPAIR_FAR) ? "far" : "on")
                         << " hotadd=" << ((feat & VIPLE_VR_LINK_F_HOTADD) ? "on" : "off")
+                        << " gameMv=" << ((feat & VIPLE_VR_LINK_F_GAME_MV) ? "on" : "off")
                         << " (client offered 0x" << std::format("{:02x}", (unsigned) offered)
                         << ", server ctrl=" << (m.opt.ctrl ? "enabled" : "disabled") << " repair=" << (m.opt.repair ? "enabled" : "disabled")
                         << " repairRtt=" << (m.opt.repair_rtt ? "enabled" : "disabled") << " repairFar=" << (m.opt.repair_far ? "enabled" : "disabled")
-                        << " hotadd=" << (m.opt.hotadd ? "enabled" : "disabled") << ')'
+                        << " hotadd=" << (m.opt.hotadd ? "enabled" : "disabled")
+                        << " gameMv=" << (m.opt.game_mv ? "enabled" : "disabled") << ')'
                         << (m.opt.flat_repair ? ((feat & VIPLE_VR_LINK_F_REPAIR_FLAT) ? " [flat session: loss repair on]" : " [flat session: loss repair off - the client did not offer it]") : "");
       }
     }
@@ -1402,6 +1426,159 @@ namespace vr::multilink {
       }
     }
     return sent;
+  }
+
+  int hub_t::send_mv(uint32_t videoFrameIndex, uint8_t frameStep, std::string_view stream) {
+    auto &m = *impl_;
+    if (m.stop.load(std::memory_order_relaxed) || !(m.features.load(std::memory_order_relaxed) & VIPLE_VR_LINK_F_GAME_MV) ||
+        stream.empty()) {
+      return 0;
+    }
+
+    const size_t total_len = stream.size();
+    const size_t chunk_total = (total_len + VIPLE_VR_MV_CHUNK_MAX - 1) / VIPLE_VR_MV_CHUNK_MAX;
+    if (chunk_total > VIPLE_VR_MV_MAX_CHUNKS) {
+      m.mv_too_big.fetch_add(1, std::memory_order_relaxed);
+      return 0;
+    }
+
+    // 連線篩選與 send_s2c 一致：先取出目前活著且未被故障注入擋住的連線；一條都沒有就不必浪費加密與序號
+    const int64_t now_ns = to_ns(clock::now());
+    const int n = m.count.load(std::memory_order_acquire);
+    std::array<link_t *, kMaxLinks> active_links {};
+    int active_count = 0;
+    for (int i = 0; i < n; ++i) {
+      auto &L = *m.links[i];
+      if (!m.alive(L, now_ns) || m.opt.fault.blocked(L.id, now_ns / 1'000'000)) {
+        continue;
+      }
+      active_links[active_count++] = &L;
+    }
+    if (active_count == 0) {
+      return 0;
+    }
+
+    const uint8_t stream_flags = total_len >= 2 ? (uint8_t) stream[1] : 0;
+    std::array<uint8_t, VIPLE_VR_MV_DGRAM_MAX> pkt {};
+    std::array<uint8_t, sizeof(VIPLE_VR_MV_CHUNK_HDR) + VIPLE_VR_MV_CHUNK_MAX> plain {};
+    int sent_dgrams = 0;
+    size_t chunks_ok = 0;
+    size_t bytes_ok = 0;
+
+    for (size_t c = 0; c < chunk_total; ++c) {
+      const size_t off = c * VIPLE_VR_MV_CHUNK_MAX;
+      const size_t chunk_len = std::min<size_t>(VIPLE_VR_MV_CHUNK_MAX, total_len - off);
+
+      VIPLE_VR_MV_CHUNK_HDR chdr {};
+      chdr.videoFrameIndex = videoFrameIndex;
+      chdr.totalLen = (uint32_t) total_len;
+      chdr.chunkIdx = (uint8_t) c;
+      chdr.chunkTotal = (uint8_t) chunk_total;
+      chdr.frameStep = frameStep;
+      chdr.flags = stream_flags;
+      chdr.chunkLen = (uint16_t) chunk_len;
+      chdr.reserved = 0;
+
+      std::memcpy(plain.data(), &chdr, sizeof(chdr));
+      std::memcpy(plain.data() + sizeof(chdr), stream.data() + off, chunk_len);
+      const size_t plain_len = sizeof(chdr) + chunk_len;
+
+      VIPLE_VR_LINK_HDR hdr {};
+      hdr.magic[0] = VIPLE_VR_LINK_MAGIC0;
+      hdr.magic[1] = VIPLE_VR_LINK_MAGIC1;
+      hdr.type = VIPLE_VR_LINK_T_MV;
+      hdr.arg = videoFrameIndex;
+      {
+        std::lock_guard lk {m.mv_mtx};
+        hdr.seq = ++m.mv_seq;  // 整場遞增、不歸零：同一把 key 之下 IV 不會重複
+        std::fill(m.mv_iv.begin(), m.mv_iv.end(), (uint8_t) 0);
+        std::memcpy(m.mv_iv.data(), &hdr.seq, sizeof(hdr.seq));
+        m.mv_iv[10] = 'H';  // Host originated
+        m.mv_iv[11] = 'M';  // Motion vector datagram
+        if (m.mv_cipher.encrypt(std::string_view {(const char *) plain.data(), plain_len}, pkt.data() + sizeof(hdr),
+                                pkt.data() + sizeof(hdr) + crypto::cipher::tag_size, &m.mv_iv) != (int) plain_len) {
+          continue;
+        }
+      }
+      const size_t total = sizeof(hdr) + crypto::cipher::tag_size + plain_len;
+
+      bool chunk_sent_any = false;
+      for (int i = 0; i < active_count; ++i) {
+        auto &L = *active_links[i];
+        hdr.linkId = L.id;
+        std::memcpy(pkt.data(), &hdr, sizeof(hdr));
+        boost::system::error_code ec;
+        {
+          std::lock_guard sk {L.sock_mtx};
+          L.video_sock.send_to(asio::buffer(pkt.data(), total), L.client_video, 0, ec);
+        }
+        if (ec) {
+          L.mv_drop.fetch_add(1, std::memory_order_relaxed);
+          m.mv_sock_err.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          L.mv_tx.fetch_add(1, std::memory_order_relaxed);
+          ++sent_dgrams;
+          chunk_sent_any = true;
+        }
+      }
+      if (chunk_sent_any) {
+        ++chunks_ok;
+        bytes_ok += chunk_len;
+      }
+    }
+
+    if (chunks_ok > 0) {
+      m.mv_tx_frames.fetch_add(1, std::memory_order_relaxed);
+      m.mv_tx_chunks.fetch_add(chunks_ok, std::memory_order_relaxed);
+      m.mv_tx_bytes.fetch_add(bytes_ok, std::memory_order_relaxed);
+    }
+    return sent_dgrams;
+  }
+
+  void hub_t::note_mv_not_ready() {
+    if (impl_) {
+      impl_->mv_not_ready.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
+  void hub_t::maybe_log_mv_tx() {
+    if (!impl_) {
+      return;
+    }
+    auto &m = *impl_;
+    if (!(m.features.load(std::memory_order_relaxed) & VIPLE_VR_LINK_F_GAME_MV)) {
+      return;
+    }
+    const auto now = clock::now();
+    if (m.mv_log_prev == clock::time_point {}) {
+      m.mv_log_prev = now;
+      return;
+    }
+    if (now - m.mv_log_prev < 10s) {
+      return;
+    }
+    m.mv_log_prev = now;
+
+    const uint64_t frames = m.mv_tx_frames.load(std::memory_order_relaxed);
+    const uint64_t chunks = m.mv_tx_chunks.load(std::memory_order_relaxed);
+    const uint64_t bytes = m.mv_tx_bytes.load(std::memory_order_relaxed);
+    const uint64_t not_ready = m.mv_not_ready.load(std::memory_order_relaxed);
+    const uint64_t too_big = m.mv_too_big.load(std::memory_order_relaxed);
+    const uint64_t sock_err = m.mv_sock_err.load(std::memory_order_relaxed);
+
+    BOOST_LOG(info) << "[VIPLE-VR-MV-TX] 10s: frames=" << (frames - m.mv_tx_frames_prev)
+                    << " chunks=" << (chunks - m.mv_tx_chunks_prev)
+                    << " bytes=" << (bytes - m.mv_tx_bytes_prev)
+                    << " notReady=" << (not_ready - m.mv_not_ready_prev)
+                    << " tooBig=" << (too_big - m.mv_too_big_prev)
+                    << " sockErr=" << (sock_err - m.mv_sock_err_prev);
+
+    m.mv_tx_frames_prev = frames;
+    m.mv_tx_chunks_prev = chunks;
+    m.mv_tx_bytes_prev = bytes;
+    m.mv_not_ready_prev = not_ready;
+    m.mv_too_big_prev = too_big;
+    m.mv_sock_err_prev = sock_err;
   }
 
   int64_t hub_t::frame_sent_us(uint32_t frame, bool *paced) const {

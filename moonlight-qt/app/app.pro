@@ -324,6 +324,8 @@ SOURCES += \
     streaming/vr/vrsynthetic.cpp \
     streaming/vr/vrtracking.cpp \
     streaming/vr/vrframemeta.cpp \
+    streaming/vr/vrgamemv.cpp \
+    streaming/vr/lz4/lz4.c \
     backend/systemproperties.cpp \
     backend/hidprobe.cpp \
     backend/vrlauncher.cpp \
@@ -429,6 +431,8 @@ HEADERS += \
     streaming/vr/vrsynthetic.h \
     streaming/vr/vrtracking.h \
     streaming/vr/vrframemeta.h \
+    streaming/vr/vrgamemv.h \
+    streaming/vr/lz4/lz4.h \
     backend/systemproperties.h \
     backend/hidprobe.h \
     backend/vrlauncher.h \

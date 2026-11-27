@@ -41,6 +41,7 @@
 #include "streaming/batterymonitor.h"  // §VR-LOWBATT
 #include "streaming/vr/vrnetmode.h"  // §VR-NETSEL
 #include "streaming/vr/vrnetbench.h"  // §VR-NETBENCH
+#include "streaming/vr/vrgamemv.h"  // §VR-GAME-MV（M-MV2）
 #include "streaming/audio/miccapture.h"  // §VR-MIC
 #endif
 
@@ -3109,6 +3110,9 @@ private:
         // §FRAME-HOTSPOT-PAUSE 的 resume() 移到 LiStopConnection() 之後（見下方）
         // §VR：tracking 執行緒會呼叫 LiSendVrTracking，必須在 LiStopConnection 之前停
         m_Session->m_VrTracking.stop();
+        // §VR-GAME-MV：收包執行緒之後不會再交付 MV；sink 先拿掉，環也清掉（下一個場次在 LiStartConnection 前重設）
+        LiSetVrGameMvSink(nullptr, nullptr);
+        vrgamemv::Ring::instance().reset();
         m_Session->m_Mic.reset();  // §VR-MIC：編碼執行緒會呼叫 LiSendVrMessage，同理
         m_Session->m_InputTestStop = true;  // §LAT-2D（dev）
         if (m_Session->m_InputTestThread.joinable()) {
@@ -3834,6 +3838,8 @@ bool Session::createXrContext(bool isRebuild, QString* error)
     xo.preferredRefreshHz = m_XrPcvr ? static_cast<float>(m_Preferences->vrRefreshHz) : 0.0f;
     xo.testVrInput = m_Preferences->vrTestInput;  // M4a R2（dev）：--vr-test-input
     xo.pcvrSynth = m_XrPcvr && m_Preferences->vrHalfRate && m_Preferences->vrSynth;  // §VR-SYNTH：只在半速串流時有意義
+    // §VR-GAME-MV（M-MV2）：--vr-game-mv off 關掉；auto（預設）＝跟著補幀。實際要不要向 host 要由 pcvrSynth 決定
+    xo.pcvrGameMv = m_XrPcvr && m_Preferences->vrGameMv != 0;
     // §VR-RATE-AUTO（2026-11-08）：全速串流時網路不穩就要求 host 中途改半速（開場就選半速時不作用）
     xo.pcvrRateAuto = m_XrPcvr && m_Preferences->vrRateAuto && !m_Preferences->vrHalfRate;
     // §VR-BUFFER：頭盔端多緩衝一格吸收到達抖動（設定 vrbufferframes，預設 1）。2.0.25 加了設定與 XR 端，這裡一直漏接，
@@ -5275,6 +5281,22 @@ bool Session::startConnectionAsync()
     LiSetVrFeedbackClockOffsetUs((int64_t)std::chrono::duration_cast<std::chrono::microseconds>(
                                      std::chrono::steady_clock::now().time_since_epoch()).count() -
                                  (int64_t)LiGetMicroseconds());
+    // §VR-GAME-MV（M-MV2）：這一場會用到遊戲內 MV 才向 host 提出（補幀開著＋PCVR＋--vr-game-mv 沒關）。
+    // 一定要在 LiStartConnection 之前設：common-c 在 LINK_HELLO 依 sink 是否為 NULL 決定提不提出 F_GAME_MV，
+    // 沒提出這一場就不會有任何 T_MV 資料報（零成本）。ring 先清掉，免得上一個場次的幀號剛好撞上
+    const bool wantGameMv = m_XrPcvr && m_Preferences->vrHalfRate && m_Preferences->vrSynth &&
+                            m_Preferences->vrGameMv != 0;
+    {
+        vrgamemv::Ring::instance().reset();
+        if (wantGameMv) {
+            LiSetVrGameMvSink(&vrgamemv::sinkEntry, nullptr);
+        }
+        else {
+            LiSetVrGameMvSink(nullptr, nullptr);
+        }
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-GAMEMV] host game motion vectors: %s",
+                    wantGameMv ? "requested (PCVR half-rate + synth)" : "not requested");
+    }
     // §LAT-2D：host 宣告 <VipleStreamInput> bit 0 才送累計位移滑鼠（舊 host、上游 Sunshine 照舊可靠傳送）；--input-test-unreliable 的 A/B 量測時不用
     LiSetRelativeMouseCumulative((m_Computer->vipleStreamInput & 1) != 0 && !m_Preferences->inputTestUnreliable);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-INPUT] relative mouse: %s",
@@ -5291,6 +5313,11 @@ bool Session::startConnectionAsync()
                                 NULL, 0, NULL, 0);
     // [VIPLE-STARTUP]：最後一個連線階段結束的時刻（各階段的起點在 clStageStarting 印）
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-STARTUP] t=%lld LiStartConnection returned %d", startupNowMs(), err);
+    if (wantGameMv) {
+        // §VR-GAME-MV：連線層協商（LINK_READY 的 hubCaps）在 LiStartConnection 內完成
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-GAMEMV] host agreed to send game motion vectors: %s",
+                    LiVrGameMvNegotiated() ? "yes" : "no");
+    }
 
     // VipleStream: Clean up RTSP tunnel after handshake completes (or fails).
     // The tunnel is only needed for the RTSP handshake — streaming uses UDP.

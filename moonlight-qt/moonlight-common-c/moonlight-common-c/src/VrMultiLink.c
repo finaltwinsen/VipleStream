@@ -280,6 +280,30 @@ static int goneHead, goneCount;
 static volatile uint32_t s2cRx, s2cDup, s2cBad;
 static uint32_t ctlSentPrev, ctlDropPrev, s2cRxPrev, s2cDupPrev, s2cBadPrev;
 
+// §VR-GAME-MV（2026-11-27，M-MV2）：app 註冊的交付 sink 與收包組包狀態（VipleVr.h 的 T_MV 分片）。
+// sink 與 ctx 在連線開始前設好、之後不再變；組包狀態只在影像接收執行緒存取；統計由 ping 執行緒每 10 秒印一次，
+// 所以計數用 volatile（和其他統計同一個寫法）。
+#define VRML_MV_SLOTS        4      // 同時組幾幀（§8.2：最多 4 幀）
+#define VRML_MV_STALE_FRAMES 8      // 比最新已交付的幀舊這麼多幀以上的半成品直接丟
+#define VRML_MV_BUF_MAX      (VIPLE_VR_MV_MAX_CHUNKS * VIPLE_VR_MV_CHUNK_MAX)
+static LiVrGameMvSink mvSink;
+static void* mvSinkCtx;
+typedef struct _VRML_MV_SLOT {
+    bool used;
+    uint32_t frame;
+    uint32_t totalLen;
+    uint8_t step;
+    uint8_t chunkTotal;
+    uint64_t mask;                  // bit i＝第 i 塊已收到（chunkTotal ≤ 64）
+    uint8_t data[VRML_MV_BUF_MAX];  // 第 i 塊放在 i * VIPLE_VR_MV_CHUNK_MAX：湊齊後整段就是壓縮流
+} VRML_MV_SLOT;
+static VRML_MV_SLOT mvSlots[VRML_MV_SLOTS];
+static bool mvHaveDelivered;
+static uint32_t mvLastDelivered;
+static uint64_t mvDeliveredMask;  // bit d＝幀 lastDelivered − d 已交付（d < VRML_MV_STALE_FRAMES）
+static volatile uint32_t mvRxChunks, mvRxDup, mvRxBad, mvFrames, mvDropped;
+static uint32_t mvRxChunksPrev, mvRxDupPrev, mvRxBadPrev, mvFramesPrev, mvDroppedPrev;
+
 // 影像封包的暫存（只在影像接收執行緒存取）
 typedef struct _VRML_STAGED {
     uint32_t frame;
@@ -620,6 +644,8 @@ static void sendHello(void) {
                   ((StreamConfig.vrFlags & VIPLE_VR_SF_REPAIR_RTT) ? (VIPLE_VR_LINK_F_REPAIR_RTT | VIPLE_VR_LINK_F_REPAIR_FAR) : 0) |
                   // §FLAT-REPAIR：平面（2D）場次才提（VR 場次送出的位元組不變）
                   (flatSession() ? VIPLE_VR_LINK_F_REPAIR_FLAT : 0) |
+                  // §VR-GAME-MV：app 註冊了 sink（這一場會用到）而且真的是 VR 場次才提；不提就一個位元組都不變
+                  ((mvSink != NULL && (StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED)) ? VIPLE_VR_LINK_F_GAME_MV : 0) |
                   (isDedicatedIf(L->pending ? L->pendingIfName : L->ifName) ? VIPLE_VR_LINK_F_DEDICATED : 0);
         // §VR-MULTILINK-HOTADD：重綁中要送的是新路徑的埠與位址（LINK_READY 之後才會換掉 L->videoSock）
         if (L->pending) {
@@ -734,6 +760,19 @@ static void logStats(uint64_t nowMs) {
         L->soloFramesPrev = sf;
     }
     Limelog("[VIPLE-VR-LINK] 10s: %s\n", line);
+
+    // §VR-GAME-MV：遊戲內 MV 的收包與組包（只有協商了 F_GAME_MV 的場次才印）。chunks／dup 是多連線各一份、
+    // 去重之後的塊數；bad＝GCM 驗證失敗（含驗證通過但標頭不合理）；frames＝交給 sink 的幀；dropped＝丟掉的半成品幀。
+    if (hubCaps & VIPLE_VR_LINK_F_GAME_MV) {
+        const uint32_t chunks = mvRxChunks, dup = mvRxDup, bad = mvRxBad, frames = mvFrames, dropped = mvDropped;
+        Limelog("[VIPLE-VR-MV-RX] 10s: chunks=%u dup=%u bad=%u frames=%u dropped=%u\n",
+                chunks - mvRxChunksPrev, dup - mvRxDupPrev, bad - mvRxBadPrev, frames - mvFramesPrev, dropped - mvDroppedPrev);
+        mvRxChunksPrev = chunks;
+        mvRxDupPrev = dup;
+        mvRxBadPrev = bad;
+        mvFramesPrev = frames;
+        mvDroppedPrev = dropped;
+    }
 }
 
 // §REVIEW-1118B：呼叫端已持有 pendMutex。把 pending 欄位換成 INVALID_SOCKET，回傳換出來的值。
@@ -1550,6 +1589,14 @@ void vrmlOnS2C(const unsigned char* tlv, int len) {
                 if (!(caps & VIPLE_VR_LINK_F_REPAIR_RTT)) {
                     caps &= (uint8_t)~VIPLE_VR_LINK_F_REPAIR_FAR;
                 }
+                // §VR-GAME-MV：沒有 sink（不會用）或不是 VR 場次，就算 server 回了也不收
+                if (mvSink == NULL || !(StreamConfig.vrFlags & VIPLE_VR_SF_ENABLED)) {
+                    caps &= (uint8_t)~VIPLE_VR_LINK_F_GAME_MV;
+                }
+                if ((caps ^ hubCaps) & VIPLE_VR_LINK_F_GAME_MV) {
+                    Limelog("[VIPLE-VR-MV-RX] game motion vectors: %s\n",
+                            (caps & VIPLE_VR_LINK_F_GAME_MV) ? "on" : "off");
+                }
                 if (caps != hubCaps) {
                     Limelog("[VIPLE-VR-LINK] link features agreed by the server: ctrl=%s repair=%s repairRtt=%s\n",
                             (caps & VIPLE_VR_LINK_F_CTRL) ? "on" : "off", (caps & VIPLE_VR_LINK_F_REPAIR) ? "on" : "off",
@@ -1989,6 +2036,199 @@ static void s2cMark(uint32_t seq) {
     }
 }
 
+// ── §VR-GAME-MV：T_MV 分片的驗證與組包（只在影像接收執行緒）──────────────
+// 資料報＝VIPLE_VR_LINK_HDR(12)＋GCM tag(16)＋密文(16 B CHUNK_HDR＋chunkLen)。IV 尾端是 'H','M'（與 T_S2C 的 'H','L' 分開），
+// 金鑰同 T_S2C。只有 GCM 驗證通過才算是 MV；驗證失敗或形狀不對一律回 false，呼叫端照原本的影像路徑處理。
+
+// 這一幀是不是已經交付過（多連線的每一塊都會重複送到；湊齊之後又來的那一份要當重複丟掉）
+static bool mvAlreadyDelivered(uint32_t frame) {
+    int32_t d;
+    if (!mvHaveDelivered) {
+        return false;
+    }
+    d = (int32_t)(mvLastDelivered - frame);
+    return d >= 0 && d < VRML_MV_STALE_FRAMES && (mvDeliveredMask & (1ull << d)) != 0;
+}
+
+static void mvMarkDelivered(uint32_t frame) {
+    int32_t d;
+    if (!mvHaveDelivered) {
+        mvHaveDelivered = true;
+        mvLastDelivered = frame;
+        mvDeliveredMask = 1;
+        return;
+    }
+    d = (int32_t)(frame - mvLastDelivered);
+    if (d > 0) {
+        // 只留 VRML_MV_STALE_FRAMES 位（挪出去的直接視為太舊）
+        mvDeliveredMask = d >= VRML_MV_STALE_FRAMES ? 0 : ((mvDeliveredMask << d) & ((1ull << VRML_MV_STALE_FRAMES) - 1ull));
+        mvDeliveredMask |= 1;
+        mvLastDelivered = frame;
+    }
+    else if (d > -VRML_MV_STALE_FRAMES) {
+        mvDeliveredMask |= 1ull << (-d);
+    }
+}
+
+// 交付了新的一幀之後，把比它舊 VRML_MV_STALE_FRAMES 幀以上的半成品掃掉（計入 dropped）
+static void mvDropStale(void) {
+    int i;
+    for (i = 0; i < VRML_MV_SLOTS; i++) {
+        if (mvSlots[i].used && (int32_t)(mvLastDelivered - mvSlots[i].frame) >= VRML_MV_STALE_FRAMES) {
+            mvSlots[i].used = false;
+            mvDropped++;
+        }
+    }
+}
+
+static VRML_MV_SLOT* mvSlotFind(uint32_t frame) {
+    int i;
+    for (i = 0; i < VRML_MV_SLOTS; i++) {
+        if (mvSlots[i].used && mvSlots[i].frame == frame) {
+            return &mvSlots[i];
+        }
+    }
+    return NULL;
+}
+
+// 取一個空格來組新的幀；四格都在組時丟掉最舊的半成品（計入 dropped）
+static VRML_MV_SLOT* mvSlotTake(uint32_t frame) {
+    VRML_MV_SLOT* pick = NULL;
+    int i;
+    for (i = 0; i < VRML_MV_SLOTS; i++) {
+        if (!mvSlots[i].used) {
+            pick = &mvSlots[i];
+            break;
+        }
+        if (pick == NULL || (int32_t)(mvSlots[i].frame - pick->frame) < 0) {
+            pick = &mvSlots[i];
+        }
+    }
+    if (pick->used) {
+        mvDropped++;
+    }
+    pick->used = true;
+    pick->frame = frame;
+    pick->totalLen = 0;
+    pick->step = 0;
+    pick->chunkTotal = 0;
+    pick->mask = 0;
+    return pick;
+}
+
+// 回傳 true＝這是一則（GCM 驗證通過的）T_MV，呼叫端不要把它當影像；false＝不是 MV，照原本的路徑處理。
+static bool mvHandle(const VRML_LINK* L, const char* buffer, int len) {
+    VIPLE_VR_LINK_HDR hdr;
+    VIPLE_VR_MV_CHUNK_HDR ch;
+    unsigned char plain[sizeof(VIPLE_VR_MV_CHUNK_HDR) + VIPLE_VR_MV_CHUNK_MAX];
+    unsigned char iv[12];
+    uint32_t seq;
+    int cipherLen;
+    int plainLen = 0;
+    VRML_MV_SLOT* s;
+    uint64_t bit;
+    uint64_t full;
+    // 收尾時 app 可能把 sink 拿掉：整支函式只認進來那一刻的值，交付時不會讀到 NULL
+    const LiVrGameMvSink sink = mvSink;
+    void* const sinkCtx = mvSinkCtx;
+
+    if (!(hubCaps & VIPLE_VR_LINK_F_GAME_MV) || sink == NULL || s2cCrypto == NULL) {
+        return false;
+    }
+    if (len < (int)sizeof(hdr) + 16 + (int)sizeof(ch) || len > VIPLE_VR_MV_DGRAM_MAX) {
+        return false;  // 這種長度不可能是 MV；不碰，照原本的路徑（絕不因為辨識而丟掉影像封包）
+    }
+    memcpy(&hdr, buffer, sizeof(hdr));
+    if (hdr.magic[0] != VIPLE_VR_LINK_MAGIC0 || hdr.magic[1] != VIPLE_VR_LINK_MAGIC1 ||
+            hdr.type != VIPLE_VR_LINK_T_MV || hdr.linkId != L->id) {
+        return false;
+    }
+    cipherLen = len - (int)sizeof(hdr) - 16;
+    if (cipherLen > (int)sizeof(plain)) {
+        return false;
+    }
+    seq = LE32(hdr.seq);
+    memset(iv, 0, sizeof(iv));
+    iv[0] = (unsigned char)(seq);
+    iv[1] = (unsigned char)(seq >> 8);
+    iv[2] = (unsigned char)(seq >> 16);
+    iv[3] = (unsigned char)(seq >> 24);
+    iv[10] = (unsigned char)'H';
+    iv[11] = (unsigned char)'M';  // Host Motion-vector（與 T_S2C 的 'H','L' 分開）
+    if (!PltDecryptMessage(s2cCrypto, ALGORITHM_AES_GCM, 0,
+                           (unsigned char*)StreamConfig.remoteInputAesKey, sizeof(StreamConfig.remoteInputAesKey),
+                           iv, sizeof(iv),
+                           (unsigned char*)buffer + sizeof(hdr), 16,
+                           (unsigned char*)buffer + sizeof(hdr) + 16, cipherLen,
+                           plain, &plainLen)) {
+        mvRxBad++;
+        return false;  // 驗證失敗：不是 MV（例如剛好前 4 B 撞值的影像封包），照原本當影像處理
+    }
+
+    // 到這裡已經通過 GCM：確定是 server 送的 T_MV，之後的檢查不通過就只能丟掉這一塊，不再交給影像路徑
+    if (plainLen < (int)sizeof(ch)) {
+        mvRxBad++;
+        return true;
+    }
+    memcpy(&ch, plain, sizeof(ch));
+    if (ch.chunkTotal == 0 || ch.chunkTotal > VIPLE_VR_MV_MAX_CHUNKS || ch.chunkIdx >= ch.chunkTotal ||
+            ch.totalLen == 0 || ch.totalLen > (uint32_t)VRML_MV_BUF_MAX ||
+            ch.chunkLen == 0 || ch.chunkLen > VIPLE_VR_MV_CHUNK_MAX ||
+            (uint32_t)ch.chunkIdx * VIPLE_VR_MV_CHUNK_MAX + ch.chunkLen > ch.totalLen ||
+            plainLen != (int)sizeof(ch) + (int)ch.chunkLen) {
+        mvRxBad++;
+        return true;
+    }
+
+    if (mvAlreadyDelivered(ch.videoFrameIndex)) {
+        mvRxDup++;  // 另一條連線較晚送到、或湊齊後才到的那一份
+        return true;
+    }
+    // 比最新已交付的幀舊太多：不必再組（半成品也會在下面被掃掉）
+    if (mvHaveDelivered && (int32_t)(mvLastDelivered - ch.videoFrameIndex) >= VRML_MV_STALE_FRAMES) {
+        return true;
+    }
+
+    s = mvSlotFind(ch.videoFrameIndex);
+    if (s == NULL) {
+        s = mvSlotTake(ch.videoFrameIndex);
+        s->chunkTotal = ch.chunkTotal;
+        s->totalLen = ch.totalLen;
+        s->step = ch.frameStep;
+    }
+    else if (s->chunkTotal != ch.chunkTotal || s->totalLen != ch.totalLen || s->step != ch.frameStep) {
+        // 同一幀的兩塊描述不同：整幀不可信，丟掉（之後的塊會重新開一格）
+        s->used = false;
+        mvDropped++;
+        mvRxBad++;
+        return true;
+    }
+
+    bit = 1ull << ch.chunkIdx;
+    if (s->mask & bit) {
+        mvRxDup++;
+        return true;
+    }
+    memcpy(s->data + (size_t)ch.chunkIdx * VIPLE_VR_MV_CHUNK_MAX, plain + sizeof(ch), ch.chunkLen);
+    s->mask |= bit;
+    mvRxChunks++;
+
+    full = s->chunkTotal >= 64 ? ~0ull : ((1ull << s->chunkTotal) - 1ull);
+    if ((s->mask & full) == full) {
+        const uint32_t frame = s->frame;
+        const uint8_t step = s->step;
+        const uint32_t total = s->totalLen;
+        uint8_t* data = s->data;
+
+        s->used = false;  // 先讓出格子，sink 裡若剛好又有封包進來也不會撞到同一格
+        mvMarkDelivered(frame);
+        mvDropStale();
+        mvFrames++;
+        sink(frame, step, data, total, sinkCtx);  // 在接收執行緒呼叫：sink 要快，app 自己丟到別的執行緒
+    }
+    return true;
+}
+
 // §VR-LINK-CTRL：server 經連線送來的 0x5508 TLV（加密；每條連線各一份）
 static void onLinkS2C(const VIPLE_VR_LINK_HDR* hdr, const char* buffer, int len) {
     unsigned char plain[VIPLE_VR_LINK_CTRL_MAX_LEN];
@@ -2137,6 +2377,11 @@ static void onVideoCtrl(VRML_LINK* L, const char* buffer, int len) {
     }
     else if (hdr.type == VIPLE_VR_LINK_T_S2C) {
         onLinkS2C(&hdr, buffer, len);
+    }
+    else if (hdr.type == VIPLE_VR_LINK_T_MV) {
+        // §VR-GAME-MV：一幀的最後一塊可能短於 64 B（不足 CHUNK_MAX 的尾巴），走的是短封包這條路。magic／type／linkId
+        // 已經對上；驗證或形狀不對就照舊丟掉（短封包原本就不是影像，不會因此少收任何影像封包）
+        mvHandle(L, buffer, len);
     }
 }
 
@@ -2600,6 +2845,11 @@ static bool stageAccept(int n, int len, int rxSlot, uint64_t batchNowUs) {
             onVideoCtrl(L, pkt, len);
             return false;
         }
+        // §VR-GAME-MV：協商了 F_GAME_MV 時先看是不是 T_MV 分片。只有 GCM 驗證通過（或確定是 MV 但內容壞掉）才吃掉；
+        // 驗證失敗一律回 false，照原本的影像路徑排進暫存，絕不因為 MV 辨識而丟掉任何影像封包
+        if (mvHandle(L, pkt, len)) {
+            return false;
+        }
         stageKey(pkt, len, &e.frame, &e.seq);
         nowUs = batchNowUs != 0 ? batchNowUs : PltGetMicroseconds();
         if (L->lastRxUs != 0) {
@@ -2688,11 +2938,20 @@ int vrmlRecvVideo(SOCKET legacy, char* buffer, int size, int* linkIdx, int timeo
     }
     videoPollUs = timeoutUs > 0 && timeoutUs < UDP_RECV_POLL_TIMEOUT_MS * 1000 ? timeoutUs : UDP_RECV_POLL_TIMEOUT_MS * 1000;
     if (!ensureStage(size)) {
-        // 記憶體不足：退回不排序的收法
+        // 記憶體不足：退回不排序的收法。§VR-GAME-MV：收到 T_MV 分片就處理掉再收下一個（最高 16 個，
+        // 避免 MV 一直來時回不去；都在這條執行緒，不會交給呼叫端當影像）
         int slot = 0;
-        int err;
-        syncRxSet(&videoSet, true);
-        err = recvRxSet(&videoSet, buffer, size, &slot, true);
+        int err = 0;
+        int tries;
+        for (tries = 0; tries < 16; tries++) {
+            syncRxSet(&videoSet, true);
+            err = recvRxSet(&videoSet, buffer, size, &slot, true);
+            if (err > 0 && videoSet.link[slot] >= 0 && mvHandle(&links[videoSet.link[slot]], buffer, err)) {
+                err = 0;
+                continue;
+            }
+            break;
+        }
         *linkIdx = err > 0 ? videoSet.link[slot] : -1;
         if (direct != NULL) {
             *direct = buffer;
@@ -2960,6 +3219,16 @@ int vrmlFeatures(void) {
     return hubCaps;
 }
 
+// §VR-GAME-MV：見 Limelight.h。sink 要在開始連線之前設好（LINK_HELLO 依它決定提不提出 F_GAME_MV）。
+void LiSetVrGameMvSink(LiVrGameMvSink sink, void* ctx) {
+    mvSink = sink;
+    mvSinkCtx = ctx;
+}
+
+int LiVrGameMvNegotiated(void) {
+    return (hubCaps & VIPLE_VR_LINK_F_GAME_MV) ? 1 : 0;
+}
+
 bool vrmlRepairRtt(unsigned mask, VRRR_RTT_STATS* out) {
     return vrmlRepairRttAt(mask, out, 0);
 }
@@ -3028,6 +3297,9 @@ int vrmlSendCtrl(const unsigned char* tlv, int length) { (void)tlv; (void)length
 int vrmlCtrlRttMs(void) { return -1; }
 int vrmlCtrlRttMsAt(uint64_t nowMs) { (void)nowMs; return -1; }
 int vrmlFeatures(void) { return 0; }
+// §VR-GAME-MV：沒編多連線時沒有 T_MV 可收；介面照樣存在（app 不必依建置選項改程式）
+void LiSetVrGameMvSink(LiVrGameMvSink sink, void* ctx) { (void)sink; (void)ctx; }
+int LiVrGameMvNegotiated(void) { return 0; }
 bool vrmlRepairRtt(unsigned mask, VRRR_RTT_STATS* out) { (void)mask; (void)out; return false; }
 bool vrmlRepairRttAt(unsigned mask, VRRR_RTT_STATS* out, uint64_t nowMs) { (void)mask; (void)out; (void)nowMs; return false; }
 bool vrmlTakeGone(uint32_t* frame, uint8_t* block) { (void)frame; (void)block; return false; }

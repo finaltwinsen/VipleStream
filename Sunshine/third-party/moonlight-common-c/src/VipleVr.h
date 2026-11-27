@@ -583,6 +583,7 @@ typedef struct _VIPLE_VR_TLV_STATS {
 #define VIPLE_VR_LINK_T_PONG     2     // S→C（只在影像 socket 回）
 #define VIPLE_VR_LINK_T_DATA     3     // C→S：AES-GCM 加密的控制訊息（0x5506；協商了 F_CTRL 之後也載 0x5507 的 LOSS／LATCH／NACK）
 #define VIPLE_VR_LINK_T_S2C      4     // S→C（影像 socket）：AES-GCM 加密的 0x5508 TLV（§VR-LINK-CTRL）；整個資料報必須 < VIPLE_VR_LINK_CTRL_MAX_LEN
+#define VIPLE_VR_LINK_T_MV       5     // S→C（影像 socket）：AES-GCM 加密的遊戲內動態向量與深度分片（§VR-GAME-MV）；資料報長度 <= VIPLE_VR_MV_DGRAM_MAX
 // 連線層功能位元：client 放在每個 VIPLE_VR_LINK_DESC.flags（它支援的），server 放在 LINK_READY 尾端的 hubCaps（同意啟用的）
 #define VIPLE_VR_LINK_F_CTRL     0x01  // §VR-LINK-CTRL：時間敏感的控制訊息走連線。C→S 的 LOSS／LATCH 放進 DATA（每條已確認的連線各一份），
                                        // S→C 的 REFRESH_START 用 T_S2C。session 位址那條鏈路變弱時，恢復不再被它拖住
@@ -605,6 +606,10 @@ typedef struct _VIPLE_VR_TLV_STATS {
 // server 回 F_CTRL｜F_REPAIR｜F_REPAIR_FLAT 三個一起才成立；少任何一個 client 就當成沒協商。VR 場次兩邊都不提、不回。
 // 舊 server 不認得這個位元、平面場次也不開 F_CTRL，回的 hubCaps 和以前一樣；舊 client 不提，新 server 就不給。
 #define VIPLE_VR_LINK_F_REPAIR_FLAT 0x40
+// §VR-GAME-MV（2026-11-27）：遊戲內動態向量與深度分片（T_MV = 5）。client 設了 LiSetVrGameMvSink 才在 LINK_HELLO
+// 提出這個位元；server 在 Windows 且 vr_game_mv != disabled 時在 LINK_READY 的 hubCaps 回這個位元。
+// 不依賴 CTRL／REPAIR，可獨立成立；舊 client 不提、舊 server 不回，未協商時雙方任何路徑都不送、不解析 T_MV（位元組零差異）。
+#define VIPLE_VR_LINK_F_GAME_MV 0x80
 #define VIPLE_VR_LINK_PING_F_CONFIRMED  0x01  // client 最近 1 s 內在這條連線收過 PONG。§VR-LINK-STANDBY：有區網直連時，
                                              // 走 Tailscale 的那一條即使收得到 PONG 也不帶（server 就不在上面送影像）
 #define VIPLE_VR_LINK_READY_OK       0
@@ -708,7 +713,45 @@ typedef struct _VIPLE_VR_FRAME_FEEDBACK_REC {
 } VIPLE_VR_FRAME_FEEDBACK_REC;       // 12 B
 #define VIPLE_VR_FRAME_FEEDBACK_MAX 18   // 12 + 18×12 = 228 B，在 TLV 251 B 內
 
+// ── §VR-GAME-MV（docs/specs/vr_game_motion_vectors.md §8）：S→C 遊戲內動態向量與深度分片 ──
+//
+// 資料報格式（走每條可用連線的影像 UDP socket，每塊 <= 1200 B，不跨 MTU、不進 RTP/FEC 佇列）：
+//   VIPLE_VR_LINK_HDR (12 B)：magic={'V','L'}, type=VIPLE_VR_LINK_T_MV(5), linkId=L.id,
+//                             seq=server 的 mv_seq（LE32，整場單調遞增、不歸零）, arg=videoFrameIndex（LE32）
+//   + GCM tag (16 B)
+//   + 密文 (16 B + chunkLen)：明文為 VIPLE_VR_MV_CHUNK_HDR (16 B) + 該塊壓縮流資料 (chunkLen B)
+//
+// 加密與 IV：
+//   - 金鑰：與 T_S2C／T_DATA 相同（StreamConfig.remoteInputAesKey / launch_session.gcm_key，AES-128-GCM）。
+//   - 12 B IV：seq（LE32）+ 6 個 0 + 'H' + 'M'（Host MV；與 T_S2C 的 'H','L'、C→S 的 'C','L'、
+//     控制通道的 'C','C'、影像的 'V' 尾端完全分離，同一把金鑰下 nonce 絕不碰撞）。
+//   - 同一塊複製送到多條連線時共用同一個 seq、同一份密文與 tag（僅明文標頭的 linkId 不同，linkId 不進 AAD）。
+//
+// 相容性與分流安全：
+//   - 只在 LINK_HELLO / LINK_READY 協商啟用 VIPLE_VR_LINK_F_GAME_MV (0x80) 時才會送出與解析。
+//   - 舊 client 不提 F_GAME_MV → server 絕不送 T_MV；舊 server 不認得 F_GAME_MV → hubCaps 不回該位元，client 絕不解析。
+//   - T_MV 資料報長度（45..1200 B）>= VIPLE_VR_LINK_CTRL_MAX_LEN (64 B)，client 在協商 F_GAME_MV 後先檢查
+//     magic={'V','L'}、type=5、linkId 相符才嘗試 AES-GCM 解密驗證；若 GCM 驗證失敗（例如剛好前 4 B 撞值的影像封包），
+//     一律退回原路徑當作一般影像 RTP 封包處理，絕不因 MV 辨識而丟失任何影像封包。
+#define VIPLE_VR_MV_DGRAM_MAX   1200  // 單一 T_MV UDP 資料報上限（12 B LINK_HDR + 16 B tag + 16 B CHUNK_HDR + 1156 B payload）
+#define VIPLE_VR_MV_CHUNK_MAX   1156  // 單一分片最大壓縮資料長度（VIPLE_VR_MV_DGRAM_MAX - 12 - 16 - 16）
+#define VIPLE_VR_MV_MAX_CHUNKS  64    // 單幀最多分片數（上限 64 × 1156 = 73984 B，超過整幀不送）
+
+typedef struct _VIPLE_VR_MV_CHUNK_HDR {
+    uint32_t videoFrameIndex; // 對應 NV_VIDEO_PACKET.frameIndex（client 的 DECODE_UNIT.frameNumber）
+    uint32_t totalLen;        // 整幀壓縮流總長度（含 12 B codec 標頭，1 .. VIPLE_VR_MV_MAX_CHUNKS * VIPLE_VR_MV_CHUNK_MAX）
+    uint8_t  chunkIdx;        // 分片索引（0 .. chunkTotal - 1；第 i 塊在壓縮流中的偏移固定為 i * VIPLE_VR_MV_CHUNK_MAX）
+    uint8_t  chunkTotal;      // 本幀總分片數（1 .. VIPLE_VR_MV_MAX_CHUNKS）
+    uint8_t  frameStep;       // 跨越的遊戲幀數 K_step（1..4）
+    uint8_t  flags;           // 保留／壓縮流旗標
+    uint16_t chunkLen;        // 本分片夾帶的壓縮資料長度（1 .. VIPLE_VR_MV_CHUNK_MAX）
+    uint16_t reserved;        // 保留 0
+} VIPLE_VR_MV_CHUNK_HDR;     // 16 B
+
 #pragma pack(pop)
+
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_MV_CHUNK_HDR) == 16, mv_chunk_hdr_16);
+VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_LINK_HDR) + 16 + sizeof(VIPLE_VR_MV_CHUNK_HDR) + VIPLE_VR_MV_CHUNK_MAX == VIPLE_VR_MV_DGRAM_MAX, mv_dgram_max_1200);
 
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_POSE) == 52, pose_52);
 VIPLE_VR_STATIC_ASSERT(sizeof(VIPLE_VR_CONTROLLER_INPUT) == 24, input_24);

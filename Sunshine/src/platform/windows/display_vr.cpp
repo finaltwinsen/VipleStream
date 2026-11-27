@@ -355,6 +355,7 @@ namespace platf::dxgi {
     uint64_t miss_torn = 0;
     uint64_t miss_enc_busy = 0;
     uint64_t miss_pending = 0;
+    double gain_sum = 0.0;
     uint64_t k_step_counts[4] {};
     std::vector<double> wait_us;
     std::vector<double> copy_compress_us;
@@ -378,6 +379,7 @@ namespace platf::dxgi {
       miss_torn = 0;
       miss_enc_busy = 0;
       miss_pending = 0;
+      gain_sum = 0.0;
       std::fill(std::begin(k_step_counts), std::end(k_step_counts), 0);
       wait_us.clear();
       copy_compress_us.clear();
@@ -553,6 +555,7 @@ namespace platf::dxgi {
       std::shared_ptr<::video::vr_game_mv_job_t> job;
       vrmv_desc_t desc {};
       std::vector<uint8_t> payload;
+      float gain = 1.0f;
     };
 
     std::mutex mtx;
@@ -609,14 +612,14 @@ namespace platf::dxgi {
       give_back_locked(std::move(b));
     }
 
-    bool submit(const std::shared_ptr<::video::vr_game_mv_job_t> &job, const vrmv_desc_t &desc, std::vector<uint8_t> &&payload) {
+    bool submit(const std::shared_ptr<::video::vr_game_mv_job_t> &job, const vrmv_desc_t &desc, std::vector<uint8_t> &&payload, float gain) {
       {
         std::lock_guard lk(mtx);
         if (queue.size() >= 4) {
           give_back_locked(std::move(payload));
           return false;
         }
-        queue.push_back(task_t {job, desc, std::move(payload)});
+        queue.push_back(task_t {job, desc, std::move(payload), gain});
       }
       cv.notify_one();
       return true;
@@ -649,7 +652,7 @@ namespace platf::dxgi {
           queue.pop_front();
         }
         const int64_t t0 = platf::qpc_counter();
-        const bool ok = vr::mv_codec::encode_rgba16f(t.desc, t.payload.data(), t.desc.payload_bytes, t.job->compressed, &planar_scratch);
+        const bool ok = vr::mv_codec::encode_rgba16f(t.desc, t.payload.data(), t.desc.payload_bytes, t.job->compressed, &planar_scratch, t.gain);
         const double us = freq > 0 ? static_cast<double>(platf::qpc_counter() - t0) * 1e6 / static_cast<double>(freq) : 0.0;
         t.job->encode_us = us;
         if (!ok) {
@@ -1245,6 +1248,7 @@ namespace platf::dxgi {
                         << " torn="sv << mw.miss_torn
                         << " encBusy="sv << mw.miss_enc_busy
                         << " pend="sv << mw.miss_pending << ')'
+                        << " gain="sv << std::format("{:.2f}", mw.hits > 0 ? mw.gain_sum / (double) mw.hits : 0.0)
                         << " waitUs p50="sv << std::format("{:.1f}", w50) << " p95="sv << std::format("{:.1f}", w95)
                         << " copyUs p50="sv << std::format("{:.1f}", c50) << " p95="sv << std::format("{:.1f}", c95)
                         << " encUs p50="sv << std::format("{:.1f}", e50) << " p95="sv << std::format("{:.1f}", e95)
@@ -1687,8 +1691,31 @@ namespace platf::dxgi {
               if ((match.matched.flags & VRMV_F_RESET) != 0) {
                 codec_flags |= vr::mv_codec::k_flag_reset;
               }
+              // §VR-GAME-MV-GAIN（M-MV2 實測後）：外掛送的是「一個遊戲幀」的位移，頭盔的補幀以「一個串流幀」外插。
+              // Palworld 卡 GPU 時遊戲 ~30 fps、串流 72 Hz，直接用會外插過頭約 2.4 倍；反過來遊戲比串流快時
+              // （半速跳幀）一個串流幀跨好幾個遊戲幀。兩個週期都用實測的移動平均，換算倍數＝串流幀週期／遊戲幀週期，
+              // 量化前乘上去，送出的 frameStep 固定 1（頭盔不再乘）。
+              {
+                const int64_t ticks = d.present_qpc - mv_last_encoded_present_;
+                if (mv_last_encoded_present_ != 0 && ticks > 0 && ticks < freq / 5) {
+                  mv_stream_period_ = mv_stream_period_ > 0.0 ? (mv_stream_period_ * 7.0 + (double) ticks) / 8.0 : (double) ticks;
+                }
+                const uint64_t did = match.matched.mv_frame_id - mv_last_gain_frame_id_;
+                const int64_t gticks = match.matched.game_present_qpc - mv_last_gain_present_;
+                if (mv_last_gain_frame_id_ != 0 && did >= 1 && did <= 8 && gticks > 0 && gticks < freq / 4) {
+                  const double per = (double) gticks / (double) did;
+                  mv_game_period_ = mv_game_period_ > 0.0 ? (mv_game_period_ * 7.0 + per) / 8.0 : per;
+                }
+                mv_last_gain_frame_id_ = match.matched.mv_frame_id;
+                mv_last_gain_present_ = match.matched.game_present_qpc;
+              }
+              float mv_gain = 1.0f;
+              if (mv_stream_period_ > 0.0 && mv_game_period_ > 0.0) {
+                mv_gain = (float) std::clamp(mv_stream_period_ / mv_game_period_, 0.1, 4.0);
+              }
+              mw.gain_sum += mv_gain;
               auto job = std::make_shared<::video::vr_game_mv_job_t>();
-              if (!enc.submit(job, match.matched, std::move(buf))) {
+              if (!enc.submit(job, match.matched, std::move(buf), mv_gain)) {
                 ++mw.miss_enc_busy;  // 背景執行緒落後（佇列滿）：這張不帶 MV
               } else {
                 meta.game_mv = job;
@@ -1698,7 +1725,7 @@ namespace platf::dxgi {
                 vr::mv_codec::output_grid_dims(match.matched, tx_w, tx_h);
                 meta.game_mv_meta.grid_w = tx_w;
                 meta.game_mv_meta.grid_h = tx_h;
-                meta.game_mv_meta.k_step = match.k_step;
+                meta.game_mv_meta.k_step = 1;  // 已換算成每個串流幀的位移（§VR-GAME-MV-GAIN）；統計仍記 match.k_step
                 meta.game_mv_meta.flags = codec_flags;
                 meta.game_mv_meta.desc_flags = match.matched.flags;
 
@@ -1755,6 +1782,7 @@ namespace platf::dxgi {
         }
       }
 
+      mv_last_encoded_present_ = d.present_qpc;  // §VR-GAME-MV-GAIN：每一張送進編碼器的都算（不論有沒有 MV）
       img->vr = meta;
       img->frame_timestamp = frame_ts;  // S1-01 修正後的換算（§PERF-1113：上面已經換算過，同一個值）
 

@@ -69,6 +69,8 @@ namespace vr::multilink {
     bool flat_repair = false;
     /// §VR-MULTILINK-HOTADD（vr_multilink_hotadd）：client 也支援時，允許同 id 重綁與死亡 slot 回收
     bool hotadd = false;
+    /// §VR-GAME-MV（vr_game_mv）：Windows 且未設為 disabled 時，client 也提出 F_GAME_MV 就協商啟用 S→C T_MV 分片傳送
+    bool game_mv = false;
     /// §PERF-1113（審查 05 第 1 項）：影像批次改成一次 WSASendMsg＋UDP_SEND_MSG_SIZE（USO）交給系統，不再逐包 send_to。
     /// 預設 false＝行為和之前完全一樣（逐包）；線上的封包位元組不變。只有 Windows 有這條路，其他平台忽略這個旗標。
     /// 設定項是 vr_multilink_uso（預設 disabled）：還沒在實機上對照過（飽和偵測、dropBlock、頭盔端幀到齊跨度）。
@@ -118,6 +120,20 @@ namespace vr::multilink {
      * @return 送出的份數（0＝沒協商這個功能、沒有可用連線，或訊息太長）
      */
     int send_s2c(std::string_view tlv);
+
+    /**
+     * @brief §VR-GAME-MV：將一幀已壓縮的遊戲內動態向量與深度流切塊（每塊 <= VIPLE_VR_MV_CHUNK_MAX）、
+     *        每塊以 AES-GCM（金鑰同 T_S2C，IV 尾端 'H','M'，獨立 mv_seq 計數器整場遞增）加密，
+     *        非阻塞送到每條可用連線的影像 socket（連線篩選同 send_s2c）。超過 64 塊整幀不送。
+     * @return 成功送出的資料報總數（所有連線合計；0＝未協商 F_GAME_MV、超過 64 塊或無可用連線）
+     */
+    int send_mv(uint32_t videoFrameIndex, uint8_t frameStep, std::string_view stream);
+
+    /// §VR-GAME-MV：記錄一次影像廣播執行緒等待 MV 壓縮工作逾時（wait_ready 失敗或結果為空）
+    void note_mv_not_ready();
+
+    /// §VR-GAME-MV：每 10 秒輸出一行 [VIPLE-VR-MV-TX] 統計（由 videoBroadcastThread 呼叫）
+    void maybe_log_mv_tx();
 
     /// 開發用故障注入的 c: 規則現在是不是在「丟掉 ENet 上的 VR 即時訊息」的期間。任何執行緒。
     bool fault_ctrl_blocked() const;

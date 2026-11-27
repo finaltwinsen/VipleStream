@@ -567,3 +567,53 @@ XrVideo::renderSynth（:2404） / XrVideo::renderTilesSynth（:3619）
 | **Server 廣播** | `SS/stream.cpp`<br>`SS/vr/vr_session.cpp` | 協商 `vrGameMv=1` $\to$ `;gameMv=1`；在 `videoBroadcastThread`（`SS/stream.cpp:6288-6325` 之後）將 `packet->vr_meta.mv_payload` 切塊、AES-GCM 加密後由視訊 UDP socket（含 multilink）送出。 |
 | **頭盔端接收與配對** | `MQ/streaming/vr/vrframemeta.h`<br>`MQ/streaming/vr/vrframemeta.cpp`<br>`Q/VideoStream.c` | 視訊 socket 辨識 `'V','L', T_MV` 並驗證 GCM tag；組齊後 LZ4 解壓放入 `VrExternalMvRing`（以 `videoFrameIndex` 為 key）。 |
 | **頭盔端補幀合成** | `MQ/streaming/xr/xrvideo.h`<br>`MQ/streaming/xr/xrvideo.cpp` | `renderNewFrame`（`:925` 旁）查 `VrExternalMvRing`；`renderSynth`（`:2404`）與 `renderTilesSynth`（`:3619`）新增 `kExtFlowBody` 轉換寫入 `m_Flow`、加入 F1～F6 退回與 HUD 保護、擴充 `dumpSynthInputs`（`:861`）。 |
+
+---
+
+## 8. M-MV2 實作規格（2026-11-27，依 M-MV1 實測修正；以本節為準，與 §4.1、§5 衝突時以本節為準）
+
+M-MV1（v2.0.301）實測後與原設計不同的地方：交接只走遊戲端 readback→SHM（`Sunshine/src/vr/vr_mv_ipc_abi.h`）；
+配對是「driver Present 前 GPU 已做完的最新一筆」＋ pending 公告；壓縮流是 `Sunshine/src/vr/vr_mv_codec.{h,cpp}` 的
+**v2**：12 B 標頭（version=2、flags、grid_w、grid_h、uv_scale_log2=12、depth_bits=6、uncompressed_len u32）＋LZ4，
+網格是 **1/16**（每眼 1436 算圖時雙眼 180×90），vx/vy 單位＝SBS UV/4096，`uv_prev − uv_cur`（DLSS 慣例：
+上一幀位置＝這一幀位置＋mv），**沒有扣頭部旋轉**；深度＝round(sqrt(逆深度)·63)。Palworld 實測每幀 p50 16.5 KB、p95 21.6 KB。
+
+### 8.1 協商：改用連線層功能位元（取代 §4.1 的 serverinfo／launch 能力位元）
+
+- 新增 `VIPLE_VR_LINK_F_GAME_MV 0x80`：client 在 LINK_HELLO 每條 DESC.flags 提出＝它會收、會用；server 在 hubCaps 回＝同意送。
+  不另外加 `/serverinfo`、`/launch`、`<VipleStreamVRSession>` 欄位：MV 只走多連線的影像 socket，沒有多連線就沒有 MV。
+- client 只在「這一場會用到」時提出：補幀（§VR-SYNTH／半速）開著，且設定沒有關掉遊戲 MV。
+- server 只在 Windows、`vr_game_mv != disabled` 時同意；外掛沒連線時不送任何東西（零成本）。
+
+### 8.2 資料報 `VIPLE_VR_LINK_T_MV = 5`（S→C，影像 socket，每條活著的連線各一份）
+
+- 版面：`VIPLE_VR_LINK_HDR`（12 B，magic 'V''L'、type 5、linkId、seq＝server 的 MV 計數器（整場遞增不歸零）、arg＝videoFrameIndex）
+  ＋ GCM tag 16 B ＋ 密文。明文＝`VIPLE_VR_MV_CHUNK_HDR`（16 B）＋這一塊的資料。IV＝seq(LE32)＋6 個 0＋'H'＋'M'（與 T_S2C 的 'H''L' 分開）。
+  金鑰同 T_S2C。
+- `VIPLE_VR_MV_CHUNK_HDR`：`u32 videoFrameIndex; u32 totalLen; u8 chunkIdx; u8 chunkTotal; u8 frameStep; u8 flags; u16 chunkLen; u16 reserved;`
+  totalLen＝整個 codec 流長度（含 12 B codec 標頭）；第 i 塊的位移＝i × `VIPLE_VR_MV_CHUNK_MAX`。
+- `VIPLE_VR_MV_DGRAM_MAX 1200`、`VIPLE_VR_MV_CHUNK_MAX`＝1200−12−16−16＝1156、`VIPLE_VR_MV_MAX_CHUNKS 64`（約 72 KB 上限，超過就不送）。
+- client 辨識：協商了 F_GAME_MV 的連線上，長度 ≥ 64 的資料報若 magic='V''L'、type=5、linkId 相符 → 解密；**GCM 驗證失敗就照原本
+  當影像處理**（不丟任何影像封包）。RTP 影像封包的第一個 byte 是版本 2（0x80～0xBF），本來就不會是 'V'(0x56)。
+- 送出時機：server 的 videoBroadcastThread 在這一幀的影像封包送完之後送（`frame_index` 那時才確定）；壓縮工作還沒好就等，
+  上限 2 ms，逾時不送（計數）。
+- client 組包在 common-c（`VrMultiLink.c`）：以 (videoFrameIndex, chunkIdx) 去重（多連線每條各一份），最多同時組 4 幀，
+  湊齊就呼叫 app 註冊的 sink：`void (*)(uint32_t videoFrameIndex, uint8_t frameStep, const uint8_t* data, uint32_t len, void* ctx)`，
+  比最新已交付的幀舊 8 幀以上的半成品直接丟。統計：收到／交付／逾時丟棄的塊數與幀數。
+
+### 8.3 頭盔端（moonlight-qt app）
+
+- 解碼：`vr_mv_codec` 的 decode 搬一份到 app（只有解碼；LZ4 也要一份）。`VrExternalMvRing`：以 videoFrameIndex 為 key 放最近 8 幀解碼結果。
+- 接點：`XrVideo::renderNewFrame` 拿到 frameNo 後查 ring；renderSynth／renderTilesSynth 合成時若這一張有外部 MV 且通過 §5.3 的 F1～F5，
+  就把 vx/vy/depth 上傳成貼圖，用一個新 shader 轉成 m_Flow（扣頭部旋轉的公式、注視點非線性映射與 kFlowBody 相同，見 §5.2），
+  跳過 synthFlow 的區塊比對；不通過就走原本的 synthFlow。m_Flow 的 `.w` 寫 2.0 標記外部 MV（`--xr-dump-frame` 看得到）。
+- 單位換算：vx/vy 是 SBS UV/4096、方向是 uv_prev − uv_cur；m_Flow 的方向與單位以 kFlowBody 的輸出為準（實作時要對齊符號）。
+  frameStep（K_step）> 1 時位移要**乘**上 K_step（送的是單一遊戲幀的 MV，兩張編碼幀之間跨 K 個遊戲幀），再依半格外插。
+- 穩定期（借鑑 UEVR-AFW）：外部 MV 中斷、解析度改變或 RESET 旗標之後，要連續 30 張都有外部 MV 才重新採用；之前走 synthFlow。
+- 統計 log `[VIPLE-VR-GAMEMV]` 每 10 秒：收到幀數、採用幀數、各退回原因次數、解碼 µs。
+
+### 8.4 之後（不在 M-MV2 第一批）
+
+- 相機位移重建（借鑑 UEVR-AFW 的相機／物體分離）：外掛每眼記錄 3 格 View/Proj 歷史並依幀號配對，server 只送物體運動殘差＋每眼矩陣，
+  頭盔用深度重建相機分量。預期大部分格子為 0。
+- HUD：UEVR 的 UI 是獨立的 overlay／quad 圖層，由 driver 依非 projection 圖層產生遮罩，取代 F6 的亮度差判斷。

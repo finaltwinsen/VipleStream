@@ -68,6 +68,11 @@ uint64_t nowUs()
                                      std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
+// §VR-GAME-MV（M-MV2）：採用外部遊戲 MV 之前要連續幾張都有（§8.3 的穩定期，借鑑 UEVR-AFW）。
+// 中斷、RESET、網格或 frameStep 改變之後重新起算；之前一律走原本的 synthFlow。
+constexpr uint32_t kExtMvWarmup = 30;
+constexpr uint64_t kExtMvGapMs = 200;  // 這麼久沒有任何一張帶外部 MV 才算中斷
+
 template <typename T>
 T xrS(XrStructureType type)
 {
@@ -414,6 +419,7 @@ void XrVideo::destroy(bool gpuWedged)
         pl_tex_destroy(m_Vulkan->gpu, &m_Mid[0]);
         pl_tex_destroy(m_Vulkan->gpu, &m_Mid[1]);
         pl_tex_destroy(m_Vulkan->gpu, &m_FlowC);
+        pl_tex_destroy(m_Vulkan->gpu, &m_ExtMvTex);  // §VR-GAME-MV
         if (m_Dp != nullptr) {
             pl_dispatch_destroy(&m_Dp);
         }
@@ -906,10 +912,10 @@ void XrVideo::dumpSynthInputs(const QString& prevPath, const QString& curPath, c
     float fvU0;
     loadFoveation(fv, &fvCyR, &fvU0);
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[VIPLE-XR] synth input dump: %s small=%dx%d(%s) flow=%dx%d(%s, %d bytes/texel) fv=(%.4f,%.4f,%.4f,%.4f,%.4f) u0=%.4f",
+                "[VIPLE-XR] synth input dump: %s small=%dx%d(%s) flow=%dx%d(%s, %d bytes/texel) fv=(%.4f,%.4f,%.4f,%.4f,%.4f) u0=%.4f ext=%d",
                 qUtf8Printable(flowPath), smalls[1]->params.w, smalls[1]->params.h, smalls[1]->params.format->name,
                 flow->params.w, flow->params.h, flow->params.format->name, static_cast<int>(flow->params.format->texel_size),
-                fv[0], fv[1], fv[2], fv[3], fvCyR, fvU0);
+                fv[0], fv[1], fv[2], fv[3], fvCyR, fvU0, m_FlowExternal ? 1 : 0);
 }
 
 bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs, bool immersive)
@@ -932,9 +938,17 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs, bool immersive)
     // best_effort_timestamp；之後 frame->pts 被改成 RTP 時戳，best_effort_timestamp 沒有人動，
     // av_frame_clone／av_frame_copy_props 也會帶著。不經 libavcodec 的路徑（PyroWave）這一欄是 AV_NOPTS_VALUE＝
     // 拿不到幀號，這一場就不會有任何一格算成 host（行為同舊版）。
+    // §VR-GAME-MV（M-MV2）：這一張的 videoFrameIndex（0x81 的 frameIndex＝解碼端的 DU.frameNumber）。
+    // 拿不到幀號（PyroWave 等）就沒有外部 MV，照原本走 synthFlow
+    uint32_t mvFrameIndex = 0;
+    bool haveMvFrameIndex = false;
     if (pts90 != AV_NOPTS_VALUE) {
         const int64_t frameNo =
             frame->best_effort_timestamp != AV_NOPTS_VALUE ? frame->best_effort_timestamp : xrrate::HostCadence::kNoFrameNo;
+        if (frameNo >= 0 && frameNo <= 0xffffffffll) {
+            mvFrameIndex = static_cast<uint32_t>(frameNo);
+            haveMvFrameIndex = true;
+        }
         // §RATE-CAUSE-HOST-IDR：關鍵幀（host 收到 IDR 要求時可能直接重編上一張、也帶 REPEATED）不算 host 逾時重編。
         // §RATE-CAUSE-HOST-REPEAT：REPEATED 那一張的時戳不是 Present，另外要「到這裡的時刻」：比上一張晚 80 ms 以上才當成
         // host 逾時重編（解碼器沒標關鍵幀的 IDR 重編通常緊接著上一張到，不會被誤記）
@@ -955,6 +969,17 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs, bool immersive)
         std::lock_guard<std::mutex> lk(m_StatsMutex);
         m_NoMetaDropped++;
         return false;
+    }
+    // §VR-GAME-MV（M-MV2）：以幀號查這一張的外部遊戲 MV（renderSynth／renderTilesSynth 合成那一格用）。
+    // 查不到（沒協商、遊戲沒開超解析度、分片掉包、解碼失敗或還沒到）就照原本走 synthFlow；
+    // 連續可用張數在這裡累加，中斷、RESET、網格或 frameStep 改變都會歸零（§8.3 的 30 張穩定期）。
+    // server 是「這一幀的影像封包送完之後才送 MV」（§8.2），偶爾會比第一次查詢晚到：合成之前再查一次（extMvTryLookup）
+    m_CurExtMv.reset();
+    m_ExtMvFrameIndex = mvFrameIndex;
+    m_HaveExtMvFrameIndex = haveMvFrameIndex;
+    extMvTryLookup();
+    if (m_Config.gameMv) {
+        vrgamemv::Ring::instance().logIfDue(t0);
     }
     // §REVIEW-1119：模式由 renderThreadMain 讀一次傳進來。這裡再讀，切回平面的空窗會跳過 ensureSwapchain 仍走平面路徑。
     if (immersive) {
@@ -2075,6 +2100,59 @@ if (!bottom) {
 }
 )GLSL";
 
+// §VR-GAME-MV（M-MV2）：把外部遊戲 MV 轉成 m_Flow（與 kFlowBody 的輸出格式、符號、單位完全相同）。
+//
+// 輸入 vs_mv 是遊戲端 1/16 網格：x/y＝SBS UV 位移（uv_prev − uv_cur）、z＝正規化逆深度（0＝沒有）、w＝1。
+// 輸出 m_Flow.xy＝「上一張的位置 − 這一張的位置 − 頭部轉動造成的位移」，整張 SBS 影像的 UV、注視點壓縮空間。
+//
+// 換算：
+//   1. m_Flow 的像素座標 uv 是壓縮（注視點）空間。先照 kFlowBody 的正向映射算出這個像素的視線方向 (tx, ty)，
+//      同時得到它在均勻（算圖）空間的座標：每眼的均勻座標＝c ＋ tx/tanW（y 為 c − ty/tanH；ext 在換算中約掉）。
+//   2. 遊戲的 MV 是均勻空間的量，所以在均勻座標取樣 vs_mv 得到 Δuv_sbs；frameStep（K_step）>1 時乘上它，
+//      換成「兩張編碼幀之間」的位移（伺服器送的是單一遊戲幀的位移，見 §3.3／§5.2）。
+//      註：§8.3 的「除以 K_step」與 §3.3、§5.2 及 server 實際送出的內容相反（display_vr 送的是配對到的那一筆
+//      單一遊戲幀 MV，k_step 另外記在 CHUNK_HDR）；這裡照 §3.3／§5.2 乘上，K_step＝1 時兩者相同。
+//   3. 頭部轉動用和 kFlowBody 完全相同的一段公式（同樣的 vs_w／vs_tan／tx／ty）算出 g，再一起除以注視點曲線
+//      斜率 slope（kFlowBody 也是 /slope）→ 回到壓縮空間。
+//   4. NaN 或 |r| > 0.25 UV 的格點歸 0（§5.3 F5）；.z 放逆深度（M-MV3 用）、.w＝2.0 標記外部 MV。
+const char* kExtFlowBody = R"GLSL(
+vec2 uv = gl_FragCoord.xy / vs_fsz;
+float ex = (uv.x < 0.5 ? uv.x : uv.x - 0.5) * 2.0;
+float cx = uv.x < 0.5 ? vs_fv.y : vs_fv.z;
+float cy = uv.x < 0.5 ? vs_fv.w : vs_cyr;
+float extx = ex < cx ? cx : 1.0 - cx;
+float exty = uv.y < cy ? cy : 1.0 - cy;
+float ux = (ex - cx) / extx;
+float uy = (uv.y - cy) / exty;
+float fb = 1.0 - vs_fv.x;
+float tx = (vs_fv.x * ux + fb * ux * ux * ux) * extx * vs_tan.x;
+float ty = -(vs_fv.x * uy + fb * uy * uy * uy) * exty * vs_tan.y;
+float ik2 = vs_fu > 0.0 ? (1.0 - vs_fv.x * vs_fu) / (1.0 - vs_fu) : 1.0;
+if (vs_fu > 0.0) {
+    float fx = abs(ux) <= vs_fu ? vs_fv.x * abs(ux) : vs_fv.x * vs_fu + ik2 * (abs(ux) - vs_fu);
+    float fy = abs(uy) <= vs_fu ? vs_fv.x * abs(uy) : vs_fv.x * vs_fu + ik2 * (abs(uy) - vs_fu);
+    tx = sign(ux) * fx * extx * vs_tan.x;
+    ty = -sign(uy) * fy * exty * vs_tan.y;
+}
+vec2 slope = vs_fu > 0.0 ? vec2(abs(ux) <= vs_fu ? vs_fv.x : ik2, abs(uy) <= vs_fu ? vs_fv.x : ik2)
+                        : vec2(vs_fv.x + 3.0 * fb * ux * ux, vs_fv.x + 3.0 * fb * uy * uy);
+// 均勻空間的座標（每眼 0..1 再併回整張 SBS）。兩眼交界用半個 texel 夾住，避免雙線性取樣混到另一眼的向量
+vec2 lin = vec2((uv.x < 0.5 ? 0.0 : 0.5) + 0.5 * (cx + tx / vs_tan.x), cy - ty / vs_tan.y);
+float xmin = (uv.x < 0.5 ? 0.0 : 0.5) + 0.5 / vs_gsz.x;
+float xmax = xmin + 0.5 - 1.0 / vs_gsz.x;
+lin = vec2(clamp(lin.x, xmin, xmax), clamp(lin.y, 0.5 / vs_gsz.y, 1.0 - 0.5 / vs_gsz.y));
+vec4 m = texture(vs_mv, lin);
+vec2 d = m.xy * vs_step;
+float dtx = vs_w.y * (1.0 + tx * tx) + vs_w.z * ty - vs_w.x * tx * ty;
+float dty = -vs_w.x * (1.0 + ty * ty) - vs_w.z * tx + vs_w.y * tx * ty;
+vec2 g = vec2(-0.5 * dtx / vs_tan.x, dty / vs_tan.y);
+vec2 r = (d - g) / slope;
+if (!(dot(r, r) <= 0.0625)) {
+    r = vec2(0.0);  // NaN／Inf 或 |r| > 0.25 UV
+}
+color = vec4(r, m.z, 2.0);
+)GLSL";
+
 // §VR-FOVEA：還原注視點編碼。輸出（swapchain）是均勻取樣的座標，解碼出來的影像是壓縮過的：對每一軸解
 // (1−a)·e³ + a·e = t（Cardano，再做一次牛頓法修掉 float 的誤差）。fv＝(a, cxL, cxR, cyL)、cyR＝右眼的垂直中心；
 // a ≥ 0.999 時原樣回傳。
@@ -2277,22 +2355,49 @@ pl_shader_desc sampledTex(const char* name, pl_tex tex)
 
 }  // namespace
 
-// §VR-SYNTH：估「扣掉頭部轉動之後」的位移場（m_Small／m_Mid 的這一張對上一張 → m_Flow）。renderSynth 與分塊版
-// （renderTilesSynth）共用；fv／fvCyR／fvU0 是縮圖所在影像的注視點參數（分塊的上排沒有變形：a＝1、u0＝0）。
-// grayThumbs＝縮圖是灰階（三個通道同值；分塊版才是），比對時直接讀一個通道（kFlowHeaderGray）。
-// 回傳 true＝m_Flow 可以用。
-bool XrVideo::synthFlow(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, float fv[4], float fvCyR, float fvU0,
-                        bool grayThumbs)
+// §VR-GAME-MV（M-MV2）：查這一張的外部 MV。renderNewFrame 一次、合成之前再一次（server 的 MV 是影像封包送完
+// 之後才送，偶爾會晚到）。已經查到就什麼都不做。
+void XrVideo::extMvTryLookup()
 {
-    const int cur = m_SmallCur, prev = cur ^ 1;
-    if (m_PrevThumbsGray != grayThumbs) {
-        // 分塊↔不分塊剛切換：上一張的縮圖是另一種（彩色對灰階），只讀一個通道會比錯 → 這一張不估位移
-        m_PrevThumbsGray = grayThumbs;
-        m_HavePrevSmall = false;
+    if (!m_Config.gameMv || m_CurExtMv || !m_HaveExtMvFrameIndex) {
+        return;
     }
-    // 位移：要有上一張、兩張的算圖姿態、而且是連續的兩幀（pts 差 1；掉過幀就不合成），轉動也不能太大
-    bool flowOk = false;
-    float half[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    auto& stats = vrgamemv::Ring::instance();
+    m_CurExtMv = stats.lookup(m_ExtMvFrameIndex);
+    const uint64_t nowMs = SDL_GetTicks64();
+    if (!m_CurExtMv) {
+        // 遊戲比串流慢時（例：30 fps 遊戲、72 Hz 串流），重送同一個遊戲幀的串流幀本來就沒有 MV，不算中斷；
+        // 超過 kExtMvGapMs 沒有任何一張帶 MV 才重新等穩定期（M-MV2 第一次實測：單張 miss 就歸零，永遠用不上）
+        if (m_ExtMvLastHitMs == 0 || nowMs - m_ExtMvLastHitMs > kExtMvGapMs) {
+            m_ExtMvRun = 0;
+        }
+        stats.noteLookup(false);
+        return;
+    }
+    m_ExtMvLastHitMs = nowMs;
+    stats.noteLookup(true);
+    const auto& f = *m_CurExtMv;
+    if (f.reset()) {
+        m_ExtMvRun = 0;
+    }
+    else if (f.gridW != m_ExtMvGridW || f.gridH != m_ExtMvGridH || f.frameStep != m_ExtMvStep) {
+        // 解析度／網格或 K_step 變了：重新等穩定期（§8.3）
+        m_ExtMvGridW = f.gridW;
+        m_ExtMvGridH = f.gridH;
+        m_ExtMvStep = f.frameStep;
+        m_ExtMvRun = 1;
+    }
+    else if (m_ExtMvRun < kExtMvWarmup) {
+        m_ExtMvRun++;
+    }
+}
+
+// §VR-SYNTH：兩張編碼幀之間能不能外插（F3 連續幀、F4 轉頭 < 10°）。原本寫在 synthFlow 裡，外部遊戲 MV 那條
+// （§VR-GAME-MV）也要用同一道閘門，抽出來兩邊共用；d 回傳 q_prev⁻¹·q_cur（機體座標，已正規化成 w ≥ 0）。
+XrVideo::PairVerdict XrVideo::synthPair(bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, float d[4])
+{
+    d[0] = d[1] = d[2] = 0.0f;
+    d[3] = 1.0f;
     // 這裡的 pts 已經不是幀號（decoder 把它換成呈現時間）：用間隔的移動平均當一幀的長度，超過 1.6 倍就是中間掉過幀
     // §REVIEW-1104：幀間隔基準改成成員，destroy 會歸零；單次大間隔仍不上修
     // §REVIEW-1119：pts 或上一張可能是 AV_NOPTS_VALUE（INT64_MIN）。先減再判斷是有號溢位（未定義行為）。
@@ -2310,93 +2415,273 @@ bool XrVideo::synthFlow(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& m
     }
     const bool consecutive = ptsDelta > 0 && m_NominalDelta > 0 && m_NominalDelta <= 1000000000 &&
                              ptsDelta <= (m_NominalDelta * 16) / 10;
-    if (smallOk && m_HavePrevSmall && hasMeta && m_HavePrevMeta && consecutive) {
-        // d＝q_prev⁻¹·q_cur（上一張到這一張的轉動，機體座標）；half＝它的一半＝normalize(d ＋ 1)
-        const float* a = m_PrevMeta.renderRot;
-        const float* b = meta.renderRot;
-        const float ax = -a[0], ay = -a[1], az = -a[2], aw = a[3];
-        float d[4] = {
-            aw * b[0] + ax * b[3] + ay * b[2] - az * b[1],
-            aw * b[1] - ax * b[2] + ay * b[3] + az * b[0],
-            aw * b[2] + ax * b[1] - ay * b[0] + az * b[3],
-            aw * b[3] - ax * b[0] - ay * b[1] - az * b[2],
+    if (!(hasMeta && m_HavePrevMeta && consecutive)) {
+        return PairVerdict::NotConsecutive;
+    }
+    // d＝q_prev⁻¹·q_cur（上一張到這一張的轉動，機體座標）
+    const float* a = m_PrevMeta.renderRot;
+    const float* b = meta.renderRot;
+    const float ax = -a[0], ay = -a[1], az = -a[2], aw = a[3];
+    d[0] = aw * b[0] + ax * b[3] + ay * b[2] - az * b[1];
+    d[1] = aw * b[1] - ax * b[2] + ay * b[3] + az * b[0];
+    d[2] = aw * b[2] + ax * b[1] - ay * b[0] + az * b[3];
+    d[3] = aw * b[3] - ax * b[0] - ay * b[1] - az * b[2];
+    if (d[3] < 0.0f) {
+        d[0] = -d[0]; d[1] = -d[1]; d[2] = -d[2]; d[3] = -d[3];
+    }
+    // 兩張之間轉不到 10°（快速甩頭時小角度近似誤差變大，人眼在掃視時也對中間格不敏感）
+    return d[3] > 0.9962f ? PairVerdict::Ok : PairVerdict::HeadTurn;
+}
+
+// §VR-SYNTH：估「扣掉頭部轉動之後」的位移場（m_Small／m_Mid 的這一張對上一張 → m_Flow）。renderSynth 與分塊版
+// （renderTilesSynth）共用；fv／fvCyR／fvU0 是縮圖所在影像的注視點參數（分塊的上排沒有變形：a＝1、u0＝0）。
+// grayThumbs＝縮圖是灰階（三個通道同值；分塊版才是），比對時直接讀一個通道（kFlowHeaderGray）。
+// 回傳 true＝m_Flow 可以用。
+bool XrVideo::synthFlow(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, float fv[4], float fvCyR, float fvU0,
+                        bool grayThumbs)
+{
+    const int cur = m_SmallCur, prev = cur ^ 1;
+    if (m_PrevThumbsGray != grayThumbs) {
+        // 分塊↔不分塊剛切換：上一張的縮圖是另一種（彩色對灰階），只讀一個通道會比錯 → 這一張不估位移
+        m_PrevThumbsGray = grayThumbs;
+        m_HavePrevSmall = false;
+    }
+    // 位移：要有上一張、兩張的算圖姿態、而且是連續的兩幀（掉過幀就不合成），轉動也不能太大。
+    // 這道閘門和外部 MV 那條共用（synthPair），兩邊的退回條件才會完全一致
+    m_FlowExternal = false;
+    bool flowOk = false;
+    float d[4];
+    if (smallOk && m_HavePrevSmall && synthPair(hasMeta, meta, pts, d) == PairVerdict::Ok) {
+        // 閘門過了：d＝q_prev⁻¹·q_cur（synthPair 算的），下面把頭部轉動換成整張影像的位移
+        const float tanW = std::max(0.5f, m_FovTanW.load(std::memory_order_relaxed));
+        const float tanH = std::max(0.5f, m_FovTanH.load(std::memory_order_relaxed));
+        // 頭部轉動造成的整張影像位移（小角度近似）：ω＝2·d.xyz（弧度，機體座標）。往左轉（ω.y > 0）景物往右移、
+        // 抬頭（ω.x > 0）景物往下移；mv 的定義是「上一張的位置 − 現在的位置」，所以取負號。一隻眼佔 UV 寬度的一半。
+        float wvec[3] = {2.0f * d[0], 2.0f * d[1], 2.0f * d[2]};
+        float tvec[2] = {tanW, tanH};
+        // 兩層：1/16 尺寸半徑 6（起點 0）→ 1/8 尺寸半徑 3（起點＝粗層的結果）。vs_init 一定要綁一張材質：
+        // 粗層不用它（vs_p.y＝0），綁 m_Flow（這個 pass 不寫它）
+        auto runFlow = [&](pl_tex curT, pl_tex prevT, pl_tex initT, pl_tex target, float radius, float useInit) {
+            float pvec[2] = {radius, useInit};
+            pl_shader shf = pl_dispatch_begin(m_Dp);
+            pl_shader_desc fd[3] = {sampledTex("vs_cur", curT), sampledTex("vs_prev", prevT), sampledTex("vs_init", initT)};
+            pl_shader_var gv[6] = {};
+            gv[0].var = pl_var_vec3("vs_w");
+            gv[0].data = wvec;
+            gv[0].dynamic = true;
+            gv[3].var = pl_var_vec2("vs_tan");
+            gv[3].data = tvec;
+            gv[3].dynamic = true;
+            gv[1].var = pl_var_vec4("vs_fv");
+            gv[1].data = fv;
+            gv[1].dynamic = true;
+            gv[2].var = pl_var_vec2("vs_p");
+            gv[2].data = pvec;
+            gv[2].dynamic = true;
+            gv[4].var = pl_var_float("vs_cyr");
+            gv[4].data = &fvCyR;
+            gv[4].dynamic = true;
+            gv[5].var = pl_var_float("vs_fu");  // §VR-FOVEA-INSET
+            gv[5].data = &fvU0;
+            gv[5].dynamic = true;
+            pl_custom_shader cs = {};
+            cs.description = "viple vr synth flow";
+            cs.header = grayThumbs ? kFlowHeaderGray : kFlowHeader;
+            cs.body = kFlowBody;
+            cs.input = PL_SHADER_SIG_NONE;
+            cs.output = PL_SHADER_SIG_COLOR;
+            cs.descriptors = fd;
+            cs.num_descriptors = 3;
+            cs.variables = gv;
+            cs.num_variables = 6;
+            if (!pl_shader_custom(shf, &cs)) {
+                pl_dispatch_abort(m_Dp, &shf);
+                return false;
+            }
+            pl_dispatch_params dpar = {};
+            dpar.shader = &shf;
+            dpar.target = target;
+            return pl_dispatch_finish(m_Dp, &dpar);
         };
-        if (d[3] < 0.0f) {
-            d[0] = -d[0]; d[1] = -d[1]; d[2] = -d[2]; d[3] = -d[3];
-        }
-        if (d[3] > 0.9962f) {  // 兩張之間轉不到 10°
-            float h[4] = {d[0], d[1], d[2], d[3] + 1.0f};
-            const float n = std::sqrt(h[0] * h[0] + h[1] * h[1] + h[2] * h[2] + h[3] * h[3]);
-            if (n > 1e-6f) {
-                for (int i = 0; i < 4; i++) {
-                    half[i] = h[i] / n;
-                }
-                // 頭部轉動造成的整張影像位移（小角度近似）：ω＝2·d.xyz（弧度，機體座標）。往左轉（ω.y > 0）景物往右移、
-                // 抬頭（ω.x > 0）景物往下移；mv 的定義是「上一張的位置 − 現在的位置」，所以取負號。一隻眼佔 UV 寬度的一半。
-                const float tanW = std::max(0.5f, m_FovTanW.load(std::memory_order_relaxed));
-                const float tanH = std::max(0.5f, m_FovTanH.load(std::memory_order_relaxed));
-                float wvec[3] = {2.0f * d[0], 2.0f * d[1], 2.0f * d[2]};
-                float tvec[2] = {tanW, tanH};
-                // 兩層：1/16 尺寸半徑 6（起點 0）→ 1/8 尺寸半徑 3（起點＝粗層的結果）。vs_init 一定要綁一張材質：
-                // 粗層不用它（vs_p.y＝0），綁 m_Flow（這個 pass 不寫它）
-                auto runFlow = [&](pl_tex curT, pl_tex prevT, pl_tex initT, pl_tex target, float radius, float useInit) {
-                    float pvec[2] = {radius, useInit};
-                    pl_shader shf = pl_dispatch_begin(m_Dp);
-                    pl_shader_desc fd[3] = {sampledTex("vs_cur", curT), sampledTex("vs_prev", prevT), sampledTex("vs_init", initT)};
-                    pl_shader_var gv[6] = {};
-                    gv[0].var = pl_var_vec3("vs_w");
-                    gv[0].data = wvec;
-                    gv[0].dynamic = true;
-                    gv[3].var = pl_var_vec2("vs_tan");
-                    gv[3].data = tvec;
-                    gv[3].dynamic = true;
-                    gv[1].var = pl_var_vec4("vs_fv");
-                    gv[1].data = fv;
-                    gv[1].dynamic = true;
-                    gv[2].var = pl_var_vec2("vs_p");
-                    gv[2].data = pvec;
-                    gv[2].dynamic = true;
-                    gv[4].var = pl_var_float("vs_cyr");
-                    gv[4].data = &fvCyR;
-                    gv[4].dynamic = true;
-                    gv[5].var = pl_var_float("vs_fu");  // §VR-FOVEA-INSET
-                    gv[5].data = &fvU0;
-                    gv[5].dynamic = true;
-                    pl_custom_shader cs = {};
-                    cs.description = "viple vr synth flow";
-                    cs.header = grayThumbs ? kFlowHeaderGray : kFlowHeader;
-                    cs.body = kFlowBody;
-                    cs.input = PL_SHADER_SIG_NONE;
-                    cs.output = PL_SHADER_SIG_COLOR;
-                    cs.descriptors = fd;
-                    cs.num_descriptors = 3;
-                    cs.variables = gv;
-                    cs.num_variables = 6;
-                    if (!pl_shader_custom(shf, &cs)) {
-                        pl_dispatch_abort(m_Dp, &shf);
-                        return false;
-                    }
-                    pl_dispatch_params dpar = {};
-                    dpar.shader = &shf;
-                    dpar.target = target;
-                    return pl_dispatch_finish(m_Dp, &dpar);
-                };
-                flowOk = runFlow(m_Mid[cur], m_Mid[prev], m_Flow, m_FlowC, 6.0f, 0.0f) &&
-                         runFlow(m_Small[cur], m_Small[prev], m_FlowC, m_Flow, 3.0f, 1.0f);
-                if (!flowOk) {
-                    SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] flow pass failed - frame synthesis off for this session");
-                    // §REVIEW-1119：和 takeStatsDeferred 的讀用同一把鎖，避免資料競爭。只在這條失敗路徑拿。
-                    {
-                        std::lock_guard<std::mutex> lk(m_StatsMutex);
-                        m_SynthFailed = true;
-                    }
-                }
+        flowOk = runFlow(m_Mid[cur], m_Mid[prev], m_Flow, m_FlowC, 6.0f, 0.0f) &&
+                 runFlow(m_Small[cur], m_Small[prev], m_FlowC, m_Flow, 3.0f, 1.0f);
+        if (!flowOk) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-SYNTH] flow pass failed - frame synthesis off for this session");
+            // §REVIEW-1119：和 takeStatsDeferred 的讀用同一把鎖，避免資料競爭。只在這條失敗路徑拿。
+            {
+                std::lock_guard<std::mutex> lk(m_StatsMutex);
+                m_SynthFailed = true;
             }
         }
     }
-
-    (void) half;
     return flowOk;
+}
+
+// §VR-GAME-MV（M-MV2）：合成那一格要用的位移場。先試外部遊戲 MV，任何一項不成立就原封不動走原本的 synthFlow。
+// 閘門＝§5.3 F1～F4 ＋ §8.3 的 30 張穩定期：
+//   F1 沒資料（沒協商／掉包）→ synthFlow
+//   F2 RESET → 這一幀完全不外插（連 synthFlow 也不跑；切鏡頭時兩張畫面無關）
+//   F3/F4 兩張不連續、轉頭超過 10° → 和 synthFlow 的閘門相同，這一格一定也不會合成，直接跳過（不重複更新幀間隔基準）
+//   §8.3 穩定期未滿 → synthFlow
+//   上傳／shader 失敗 → synthFlow（並在 log 裡分開計數）
+bool XrVideo::synthFlowForFrame(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME_META& meta, int64_t pts, float fv[4],
+                                float fvCyR, float fvU0, bool grayThumbs)
+{
+    if (!m_Config.gameMv) {
+        return synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0, grayThumbs);
+    }
+    auto& stats = vrgamemv::Ring::instance();
+    // 合成之前再查一次：server 的 T_MV 是這一幀的影像封包送完之後才送（§8.2），可能比 renderNewFrame 那次查詢晚到
+    extMvTryLookup();
+    if (m_ExtMvFailed) {
+        // 這個 session 已經確定用不了（格式／上傳／shader 失敗過，失敗當下已印過警告）：不再每幀重試
+        return synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0, grayThumbs);
+    }
+    if (!m_CurExtMv) {
+        stats.noteFallback(vrgamemv::Fallback::NoData);
+        return synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0, grayThumbs);
+    }
+    if (m_CurExtMv->reset()) {
+        stats.noteFallback(vrgamemv::Fallback::Reset);
+        m_PrevThumbsGray = grayThumbs;
+        return false;
+    }
+    if (m_ExtMvRun < kExtMvWarmup) {
+        stats.noteFallback(vrgamemv::Fallback::Warmup);
+        return synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0, grayThumbs);
+    }
+    float d[4];
+    const PairVerdict pv = synthPair(hasMeta, meta, pts, d);
+    if (pv != PairVerdict::Ok) {
+        stats.noteFallback(pv == PairVerdict::HeadTurn ? vrgamemv::Fallback::HeadTurn : vrgamemv::Fallback::Cadence);
+        m_PrevThumbsGray = grayThumbs;
+        return false;
+    }
+    vrgamemv::Fallback fail = vrgamemv::Fallback::Upload;
+    if (!extFlowToTexture(d, fv, fvCyR, fvU0, &fail)) {
+        stats.noteFallback(fail);
+        return synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0, grayThumbs);
+    }
+    stats.noteAdopted();
+    m_PrevThumbsGray = grayThumbs;
+    m_FlowExternal = true;  // dump 的 log 用；synthFlow 自己會把它清成 false
+    return true;
+}
+
+// 把這一張的外部 MV 上傳成 RGBA16F 小貼圖（x/y＝SBS UV 位移、z＝逆深度、w＝1），再跑 kExtFlowBody 寫 m_Flow。
+// 網格是伺服器给的 1/16（例：每眼 1436 算圖時 180×90），上傳量約 260 KB；貼圖重建後立刻整張覆寫，不需要保留舊內容。
+bool XrVideo::extFlowToTexture(const float d[4], const float fv[4], float fvCyR, float fvU0, vrgamemv::Fallback* fail)
+{
+    *fail = vrgamemv::Fallback::Upload;
+    if (m_ExtMvFailed || !m_CurExtMv || m_Flow == nullptr || m_Dp == nullptr) {
+        return false;
+    }
+    const vrgamemv::Frame& f = *m_CurExtMv;
+    const int gw = f.gridW;
+    const int gh = f.gridH;
+    if (gw < 2 || gh < 1) {
+        return false;
+    }
+    pl_gpu g = m_Vulkan->gpu;
+    const auto caps = static_cast<pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
+    pl_fmt fmt = pl_find_fmt(g, PL_FMT_FLOAT, 4, 16, 16, caps);
+    pl_tex_params tp = {};
+    tp.w = gw;
+    tp.h = gh;
+    tp.format = fmt;
+    tp.sampleable = true;
+    tp.host_writable = true;
+    if (fmt == nullptr || !pl_tex_recreate(g, &m_ExtMvTex, &tp)) {
+        // 格式或配置不成立：這個 session 不再試（區塊比對照舊）
+        m_ExtMvFailed = true;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-GAMEMV] external MV texture (%dx%d) unavailable - staying on synthFlow", gw, gh);
+        vrgamemv::Ring::instance().noteUpload(false);
+        return false;
+    }
+    const size_t cells = static_cast<size_t>(gw) * static_cast<size_t>(gh);
+    m_ExtMvStage.resize(cells * 4);
+    constexpr float kInvUv = 1.0f / static_cast<float>(1u << vrgamemv::kUvScaleLog2);
+    constexpr float kDepthMax = static_cast<float>((1u << vrgamemv::kDepthBits) - 1u);
+    for (size_t i = 0; i < cells; i++) {
+        m_ExtMvStage[i * 4 + 0] = vrgamemv::floatToHalf(static_cast<float>(f.vx[i]) * kInvUv);
+        m_ExtMvStage[i * 4 + 1] = vrgamemv::floatToHalf(static_cast<float>(f.vy[i]) * kInvUv);
+        float z = 0.0f;
+        if (f.hasDepth) {
+            // 深度是 round(sqrt(逆深度)·63)，這裡還原成正規化逆深度；沒有深度時留 0（M-MV3 才用得到）
+            const float q = static_cast<float>(f.depth[i]) / kDepthMax;
+            z = q * q;
+        }
+        m_ExtMvStage[i * 4 + 2] = vrgamemv::floatToHalf(z);
+        m_ExtMvStage[i * 4 + 3] = vrgamemv::floatToHalf(1.0f);
+    }
+    pl_tex_transfer_params xfer = {};
+    xfer.tex = m_ExtMvTex;
+    xfer.ptr = m_ExtMvStage.data();
+    xfer.row_pitch = static_cast<size_t>(gw) * 4u * sizeof(uint16_t);
+    const bool upOk = pl_tex_upload(g, &xfer);
+    vrgamemv::Ring::instance().noteUpload(upOk);
+    if (!upOk) {
+        m_ExtMvFailed = true;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-GAMEMV] external MV upload failed (%dx%d) - staying on synthFlow", gw, gh);
+        return false;
+    }
+
+    const float tanW = std::max(0.5f, m_FovTanW.load(std::memory_order_relaxed));
+    const float tanH = std::max(0.5f, m_FovTanH.load(std::memory_order_relaxed));
+    float wvec[3] = {2.0f * d[0], 2.0f * d[1], 2.0f * d[2]};
+    float tvec[2] = {tanW, tanH};
+    float fsz[2] = {static_cast<float>(m_Flow->params.w), static_cast<float>(m_Flow->params.h)};
+    float gsz[2] = {static_cast<float>(gw), static_cast<float>(gh)};
+    float step = static_cast<float>(std::clamp<int>(f.frameStep, 1, 4));
+
+    pl_shader sh = pl_dispatch_begin(m_Dp);
+    pl_shader_desc sd[1] = {sampledTex("vs_mv", m_ExtMvTex)};
+    pl_shader_var sv[8] = {};
+    sv[0].var = pl_var_vec3("vs_w");
+    sv[0].data = wvec;
+    sv[1].var = pl_var_vec2("vs_tan");
+    sv[1].data = tvec;
+    sv[2].var = pl_var_vec4("vs_fv");
+    sv[2].data = const_cast<float*>(fv);
+    sv[3].var = pl_var_float("vs_cyr");
+    sv[3].data = &fvCyR;
+    sv[4].var = pl_var_float("vs_fu");
+    sv[4].data = &fvU0;
+    sv[5].var = pl_var_float("vs_step");
+    sv[5].data = &step;
+    sv[6].var = pl_var_vec2("vs_fsz");
+    sv[6].data = fsz;
+    sv[7].var = pl_var_vec2("vs_gsz");
+    sv[7].data = gsz;
+    for (pl_shader_var& v : sv) {
+        v.dynamic = true;
+    }
+    pl_custom_shader cs = {};
+    cs.description = "viple vr game mv flow";
+    cs.body = kExtFlowBody;
+    cs.input = PL_SHADER_SIG_NONE;
+    cs.output = PL_SHADER_SIG_COLOR;
+    cs.descriptors = sd;
+    cs.num_descriptors = 1;
+    cs.variables = sv;
+    cs.num_variables = 8;
+    bool shOk = false;
+    if (pl_shader_custom(sh, &cs)) {
+        pl_dispatch_params dpar = {};
+        dpar.shader = &sh;
+        dpar.target = m_Flow;
+        shOk = pl_dispatch_finish(m_Dp, &dpar);
+    }
+    else {
+        pl_dispatch_abort(m_Dp, &sh);
+    }
+    vrgamemv::Ring::instance().noteShader(shOk);
+    if (!shOk) {
+        *fail = vrgamemv::Fallback::Shader;
+        m_ExtMvFailed = true;
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "[VIPLE-VR-GAMEMV] kExtFlowBody failed - staying on synthFlow");
+    }
+    return shOk;
 }
 
 // §VR-SYNTH：mapped → m_Full／m_Small；有上一張就估位移；最後一個 pass 把上半（複製）與下半（合成）寫進 swapchain。
@@ -2543,7 +2828,8 @@ bool XrVideo::renderSynth(pl_frame* mapped, const pl_frame* targetProto, pl_tex 
         }
     }
 
-    const bool flowOk = synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0, false);  // 縮圖是彩色的
+    // §VR-GAME-MV：先試外部遊戲 MV，不成立才走原本的區塊比對（縮圖是彩色的）
+    const bool flowOk = synthFlowForFrame(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0, false);
 
     // 上半複製、下半合成（沒有位移場時 k＝0：下半只是複製，不會被拿來顯示）
     float k = flowOk ? 0.5f : 0.0f;
@@ -3757,8 +4043,8 @@ bool XrVideo::renderTilesSynth(pl_frame* mapped, const pl_frame* targetProto, pl
     loadFoveation(fv, &fvCyR, &fvU0);
     fv[0] = 1.0f;
     fvU0 = 0.0f;
-    // 縮圖是 kTilesDownBody 從亮度平面縮的（再縮一半那一張也是）：灰階
-    const bool flowOk = synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0, true);
+    // 縮圖是 kTilesDownBody 從亮度平面縮的（再縮一半那一張也是）：灰階。§VR-GAME-MV 也接在同一個入口
+    const bool flowOk = synthFlowForFrame(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0, true);
     if (m_SynthFailed) {
         return true;
     }

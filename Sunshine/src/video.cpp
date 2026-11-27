@@ -3163,6 +3163,8 @@ namespace video {
           // 逾時重編上一張時加 REPEATED；還沒有任何幀的 metadata 時標 POSE_FALLBACK。
           if (vr_last_img_meta) {
             vr_meta = *vr_last_img_meta;
+            // §VR-GAME-MV：每一張擷取影像附帶的 MV 只隨該幀送一次；逾時重編（vr_repeated）時絕不重送上一張用過的 MV
+            vr_last_img_meta->game_mv.reset();
             if (vr_repeated) {
               vr_meta.flags |= VIPLE_VR_FF_REPEATED;
             }
