@@ -88,6 +88,7 @@ import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.util.DisplayMetrics;
 import android.util.Rational;
 import android.util.TypedValue;
 import android.view.Display;
@@ -211,6 +212,14 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     private Display externalDisplay;
     private Display.Mode externalChosenMode;
     private int externalDisplayId = Display.INVALID_DISPLAY;
+    // §LOGHYG-EXTDISP（2026-11-27）：上一次真的處理過的顯示快照。系統會在模式完全沒變時也送
+    // onDisplayChanged（實測每秒 2 次，單檔 198 行），只有 display id／尺寸／密度／刷新率真的變了
+    // 才處理與列印，避免每幀重設 layout。
+    private int externalModeSnapshotDisplayId = Display.INVALID_DISPLAY;
+    private int externalModeSnapshotWidth = -1;
+    private int externalModeSnapshotHeight = -1;
+    private float externalModeSnapshotRefresh = -1f;
+    private int externalModeSnapshotDensity = -1;
     private boolean externalDisplayActive;
     private boolean externalDisplayLossHandled;
     private boolean externalDismissPending;
@@ -2053,7 +2062,27 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     }
                     return;
                 }
+                // §LOGHYG-EXTDISP：同一台、同一個模式、同一個密度＝系統的例行 callback，不做任何事。
+                // 這裡原本每次都會 pickMode + setPreferredMode，模式沒變也可能再觸發一次 callback。
                 externalDisplay = display;
+                Display.Mode currentMode = display.getMode();
+                DisplayMetrics realMetrics = new DisplayMetrics();
+                display.getRealMetrics(realMetrics);
+                if (currentMode != null
+                        && externalModeSnapshotDisplayId == displayId
+                        && externalModeSnapshotWidth == currentMode.getPhysicalWidth()
+                        && externalModeSnapshotHeight == currentMode.getPhysicalHeight()
+                        && Math.abs(externalModeSnapshotRefresh - currentMode.getRefreshRate()) < 0.01f
+                        && externalModeSnapshotDensity == realMetrics.densityDpi) {
+                    return;
+                }
+                externalModeSnapshotDisplayId = displayId;
+                if (currentMode != null) {
+                    externalModeSnapshotWidth = currentMode.getPhysicalWidth();
+                    externalModeSnapshotHeight = currentMode.getPhysicalHeight();
+                    externalModeSnapshotRefresh = currentMode.getRefreshRate();
+                }
+                externalModeSnapshotDensity = realMetrics.densityDpi;
                 Display.Mode previous = externalChosenMode;
                 Display.Mode mode = ExternalDisplayHelper.pickMode(
                         display.getSupportedModes(), externalStreamWidth(), externalStreamHeight(), externalStreamFps());

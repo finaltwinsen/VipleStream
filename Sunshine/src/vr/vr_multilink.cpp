@@ -2119,8 +2119,11 @@ namespace vr::multilink {
     return alive;
   }
 
-  std::string hub_t::take_stats_line() {
+  std::string hub_t::take_stats_line(std::string *summary) {
     auto &m = *impl_;
+    if (summary) {
+      summary->clear();
+    }
     const int n = m.count.load(std::memory_order_acquire);
     if (n == 0) {
       return {};
@@ -2205,6 +2208,21 @@ namespace vr::multilink {
         L.pace_late.exchange(0),
         L.pace_frames.exchange(0)
       );
+      // §LOGDROP-1127：短摘要（預設每 10 秒印這一行；完整行每 60 秒才印一次）
+      if (summary) {
+        if (!summary->empty()) {
+          *summary += " | ";
+        }
+        *summary += std::format(
+          "L{} {}{} {:.1f}Mbps deliv={} rtt={}ms",
+          (int) L.id,
+          m.alive(L, now_ns) ? "up" : "down",
+          L.dedicated.load() ? "(adapter)" : "",
+          (c.tx_bytes - p.tx_bytes) * 8 / secs / 1e6,
+          L.deliv_pct.load() < 0 ? std::string {"-"} : std::format("{}%", L.deliv_pct.load()),
+          rtt == VIPLE_VR_LINK_RTT_UNKNOWN ? std::string {"-"} : std::format("{:.1f}", rtt / 10.0)
+        );
+      }
       L.prev = c;
     }
     return s;

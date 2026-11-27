@@ -10,6 +10,7 @@
 #include <format>
 #include <list>
 #include <thread>
+#include <vector>
 
 // lib includes
 #include <boost/pointer_cast.hpp>
@@ -52,6 +53,9 @@ using namespace std::literals;
 namespace video {
 
   namespace {
+    // §LOGDROP-1127：最近一次探測失敗的原因（/launch 的 503 訊息要分辨「沒有顯示器」與「沒有 encoder」）
+    std::atomic<probe_failure_e> g_probe_failure {probe_failure_e::none};
+
     /**
      * @brief Check if we can allow probing for the encoders.
      * @return True if there should be no issues with the probing, false if we should prevent it.
@@ -78,9 +82,14 @@ namespace video {
       }
 
       BOOST_LOG(error) << "No display devices are active at the moment! Cannot probe the encoders.";
+      g_probe_failure.store(probe_failure_e::display, std::memory_order_relaxed);
       return false;
     }
   }  // namespace
+
+  probe_failure_e last_probe_failure() {
+    return g_probe_failure.load(std::memory_order_relaxed);
+  }
 
   void free_ctx(AVCodecContext *ctx) {
     avcodec_free_context(&ctx);
@@ -2051,17 +2060,18 @@ namespace video {
 
     auto &video_format = encoder.codec_from_config(config);
     if (!video_format[encoder_t::PASSED] || !disp->is_codec_supported(video_format.name, config)) {
-      BOOST_LOG(error) << encoder.name << ": "sv << video_format.name << " mode not supported"sv;
+      // §LOGDROP-1127：探測（4:4:4／HDR／AV1 test）走到這裡是「不支援」，不是錯誤
+      BOOST_LOG(info) << "probe: " << encoder.name << ": "sv << video_format.name << " mode not supported"sv;
       return nullptr;
     }
 
     if (config.dynamicRange && !video_format[encoder_t::DYNAMIC_RANGE]) {
-      BOOST_LOG(error) << video_format.name << ": dynamic range not supported"sv;
+      BOOST_LOG(info) << "probe: " << video_format.name << ": dynamic range (HDR) not supported"sv;
       return nullptr;
     }
 
     if (config.chromaSamplingType == 1 && !video_format[encoder_t::YUV444]) {
-      BOOST_LOG(error) << video_format.name << ": YUV 4:4:4 not supported"sv;
+      BOOST_LOG(info) << "probe: " << video_format.name << ": YUV 4:4:4 not supported"sv;
       return nullptr;
     }
 
@@ -2702,7 +2712,8 @@ namespace video {
     constexpr int STARTUP_IDR_RETRY_FRAME = 16;  // §K.14（見下方）
     // §S.19 診斷：標示本 encoder 生命期的 frame_nr 起點，一眼看出
     // §K.14 會不會再觸發（encoder 重建後 frame_nr 已 >16 就不會）。
-    BOOST_LOG(info) << "[VIPLE-QLOG] §S.19 cooldown armed f=" << frame_nr
+    // §LOGDROP-1127：IDR cooldown 的例行行（armed／REQ）降到 debug；只留 IDR-EMIT 在 info。
+    BOOST_LOG(debug) << "[VIPLE-QLOG] §S.19 cooldown armed f=" << frame_nr
                     << (frame_nr < STARTUP_IDR_RETRY_FRAME ? " (K.14 pending)" : " (K.14 skipped: rebuilt encoder)");
 
     // §ABR-RAMP：追蹤上次套用的 bitrate，判斷本次變更是降速（cut，需
@@ -2827,6 +2838,24 @@ namespace video {
     uint32_t enc_dup_late = 0;  // 重複幀編完時已經有真畫面在等的
     auto enc_dup_log_at = std::chrono::steady_clock::now();
 
+    // §LOGDROP-1127 [VIPLE-CAP]：2D 擷取端 10 秒統計（對照 VR 的 [VIPLE-VR-CAP]）。
+    // 目的是把「主機跟不上（convert／encode 慢）」和「重複幀路徑慢」分開；只加統計，不改節拍。
+    const bool cap_track = config.captureSource == 0;
+    uint32_t cap_copied = 0;  // pop 到新影像的次數
+    uint32_t cap_dup = 0;  // 逾時重編上一張的次數
+    uint32_t cap_pop_timeout = 0;  // pop(max_frametime) 逾時的次數
+    uint32_t cap_encoded = 0;  // 這 10 秒實際編出去的張數（算 fps）
+    std::vector<double> cap_convert_ms;
+    std::vector<double> cap_encode_ms;
+    auto cap_log_at = std::chrono::steady_clock::now();
+    const auto cap_pct = [](std::vector<double> &v, double q) {
+      if (v.empty()) {
+        return 0.0;
+      }
+      std::sort(v.begin(), v.end());
+      return v[std::min(v.size() - 1, static_cast<std::size_t>(q * (double) (v.size() - 1) + 0.5))];
+    };
+
     while (true) {
       // Break out of the encoding loop if any of the following are true:
       // a) The stream is ending
@@ -2880,7 +2909,8 @@ namespace video {
         requested_idr_frame = true;
         idr_events->pop();
         // §QLOG: IDR 被 idr_events 觸發（來自 AIMD / client 請求 / §K.14 外的其他路徑）
-        BOOST_LOG(info) << "[VIPLE-QLOG] IDR-REQ via idr_events f=" << frame_nr;
+        // §LOGDROP-1127：例行請求降到 debug（真正的 IDR-EMIT 仍留在 info）
+        BOOST_LOG(debug) << "[VIPLE-QLOG] IDR-REQ via idr_events f=" << frame_nr;
       }
 
       if (requested_idr_frame) {
@@ -3121,14 +3151,25 @@ namespace video {
           if (config.captureSource == 1) {
             vr_last_img_meta = img->vr;  // §C.4：display_vr_t 帶來的 renderPose／epoch
           }
+          if (cap_track) {
+            ++cap_copied;
+          }
+          const auto convert_t0 = std::chrono::steady_clock::now();
           if (session->convert(*img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             return;
+          }
+          if (cap_track) {
+            cap_convert_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - convert_t0).count());
           }
         } else if (!images->running()) {
           break;
         } else {
           enc_dup_this = true;
+          if (cap_track) {
+            ++cap_dup;
+            ++cap_pop_timeout;
+          }
         }
       }
 
@@ -3201,9 +3242,14 @@ namespace video {
         }
       }
 
+      const auto encode_t0 = std::chrono::steady_clock::now();
       if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp, vr_state ? &vr_meta : nullptr)) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         return;
+      }
+      if (cap_track) {
+        cap_encode_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - encode_t0).count());
+        ++cap_encoded;
       }
 
       if (enc_dup_track) {
@@ -3215,14 +3261,35 @@ namespace video {
             ++enc_dup_late;
           }
         }
-        // 有重複幀時每 5 秒一行；完全沒有時每 60 秒一行（win 是這一行涵蓋的實際時間，算每秒次數用它）
+        // 有重複幀時每 30 秒一行；完全沒有時每 60 秒一行（win 是這一行涵蓋的實際時間，算每秒次數用它）
+        // §LOGDROP-1127：有重複幀的期間原本 5 秒一行，靜態場次占比很高，改成 30 秒。
         const auto enc_dup_now = std::chrono::steady_clock::now();
-        if (enc_dup_now - enc_dup_log_at >= (enc_dup_count ? 5s : 60s)) {
+        if (enc_dup_now - enc_dup_log_at >= (enc_dup_count ? 30s : 60s)) {
           BOOST_LOG(info) << "[VIPLE-ENC-DUP] win=" << std::chrono::duration_cast<std::chrono::milliseconds>(enc_dup_now - enc_dup_log_at).count()
                           << "ms frames=" << enc_dup_frames << " dups=" << enc_dup_count << " lateBehindDup=" << enc_dup_late
                           << " wait=" << max_frametime.count() << "ms";
           enc_dup_frames = enc_dup_count = enc_dup_late = 0;
           enc_dup_log_at = enc_dup_now;
+        }
+      }
+
+      // §LOGDROP-1127 [VIPLE-CAP]：2D 擷取端 10 秒統計（copied／dup／popTimeout／convert／encode／fps）。
+      // 和 VR 的 [VIPLE-VR-CAP] 同一種寫法，讓「主機跟不上」與「重複幀路徑慢」分得開。
+      if (cap_track) {
+        const auto cap_now = std::chrono::steady_clock::now();
+        const auto cap_window = cap_now - cap_log_at;
+        if (cap_window >= 10s) {
+          const double secs = std::max(0.001, std::chrono::duration<double>(cap_window).count());
+          BOOST_LOG(info) << "[VIPLE-CAP] 10s: copied=" << cap_copied
+                          << " dup=" << cap_dup
+                          << " popTimeout=" << cap_pop_timeout
+                          << " convertMs p50/p95=" << std::format("{:.2f}", cap_pct(cap_convert_ms, 0.50)) << '/' << std::format("{:.2f}", cap_pct(cap_convert_ms, 0.95))
+                          << " encodeMs p50/p95=" << std::format("{:.2f}", cap_pct(cap_encode_ms, 0.50)) << '/' << std::format("{:.2f}", cap_pct(cap_encode_ms, 0.95))
+                          << " fps=" << std::format("{:.1f}", cap_encoded / secs);
+          cap_copied = cap_dup = cap_pop_timeout = cap_encoded = 0;
+          cap_convert_ms.clear();
+          cap_encode_ms.clear();
+          cap_log_at = cap_now;
         }
       }
 
@@ -4138,6 +4205,7 @@ namespace video {
 
   int probe_encoders(int capture_source, const vr_probe_shape_t *shape, bool vr_cache) {
     const bool vr_probe = capture_source == 1;
+    g_probe_failure.store(probe_failure_e::none, std::memory_order_relaxed);
     // M1b S1-09（§C.6 第 2 點）：VR 探測不碰 output（只在 adapter 上建 device），不受「沒有 active
     // 顯示器時探測會弄壞 DXGI」的閘門限制。UNVERIFIED：headless 且完全沒有 active 顯示器時
     // D3D11CreateDevice＋NVENC 是否安全（host 有 HDMI 誘騙器，無法自然重現）。
@@ -4286,6 +4354,7 @@ namespace video {
 
     if (chosen_encoder == nullptr) {
       BOOST_LOG(fatal) << "Unable to find display or encoder during startup."sv;
+      g_probe_failure.store(probe_failure_e::encoder, std::memory_order_relaxed);
       // VipleStream §K.dd.select: 判斷「使用者有沒有手動指定顯示器」要看 raw config，
       // 不是 map_output_name 的結果。Windows 上 GUID 對不到實體顯示器時映射結果會是
       // 空字串，於是「明明指定了顯示器、而且正是那台不見了」的使用者反而被導向泛用訊息，

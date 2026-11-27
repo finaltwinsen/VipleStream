@@ -1523,7 +1523,8 @@ bool XrVideo::renderNewFrame(AVFrame* frame, uint32_t mboxUs, bool immersive)
         tp.crop.y1 = static_cast<float>(2 * tileH);
         r2 = pl_render_image(m_Renderer, &mapped, &tp, &m_RenderParams);
     }
-    if (r2 && wantDump && (synthOk || m_SynthFailed)) {
+    // §VR-GAME-MV：開了遊戲 MV 時只存「用遊戲 MV 合成」的那幾張（M-MV2 畫面正確性比對用；區塊比對的照舊不存）
+    if (r2 && wantDump && (synthOk || m_SynthFailed) && (!m_Config.gameMv || m_FlowExternal || m_SynthFailed)) {
         dumpTexture(tex2, dumpPathFor(""));
         // 第一次發布的那一張存成 <路徑>-first.png（副檔名之前插 -first）
         saveDump(firstDump, dumpPathFor("-first"), firstDumpW, firstDumpH);
@@ -2150,6 +2151,24 @@ vec2 r = (d - g) / slope;
 if (!(dot(r, r) <= 0.0625)) {
     r = vec2(0.0);  // NaN／Inf 或 |r| > 0.25 UV
 }
+// F6 HUD 保護（§5.3，M-MV2 實測：UEVR 的選單被底下場景的 MV 拉歪）：遊戲的 MV 不知道上面疊了選單／HUD。
+// 比兩個假設在這一格（含上下左右鄰格）哪個吻合：「靜止」＝上一張同一位置、「照遊戲 MV 動」＝上一張 uv＋mv（mv＝上一張位置
+// − 這一張位置；這裡用這一格的總位移 d，含頭部轉動，換到注視點壓縮座標要除以 slope）。靜止明顯比較吻合才當成固定在畫面上的東西、不外插。
+// 只看「靜止吻合」會把移動中但紋理很淡的表面也歸零（實測大小比例從 0.49 掉到 0.21）。縮圖與 m_Flow 同在 1/8、同一座標。
+if (vs_hud > 0.5 && dot(d * vs_fsz, d * vs_fsz) > 0.25) {
+    vec2 px = 1.0 / vs_fsz;
+    float dStill = 0.0;
+    float dMove = 0.0;
+    for (int k = 0; k < 5; k++) {
+        vec2 o = k == 0 ? vec2(0.0) : (k == 1 ? vec2(px.x, 0.0) : (k == 2 ? vec2(-px.x, 0.0) : (k == 3 ? vec2(0.0, px.y) : vec2(0.0, -px.y))));
+        float yc = dot(texture(vs_cur, uv + o).rgb, vec3(0.299, 0.587, 0.114));
+        dStill = max(dStill, abs(yc - dot(texture(vs_prev, uv + o).rgb, vec3(0.299, 0.587, 0.114))));
+        dMove = max(dMove, abs(yc - dot(texture(vs_prev, uv + o + d / slope).rgb, vec3(0.299, 0.587, 0.114))));
+    }
+    if (dStill < 0.015 && dStill * 2.0 < dMove) {
+        r = vec2(0.0);
+    }
+}
 color = vec4(r, m.z, 2.0);
 )GLSL";
 
@@ -2558,6 +2577,7 @@ bool XrVideo::synthFlowForFrame(bool smallOk, bool hasMeta, const VIPLE_VR_FRAME
         return false;
     }
     vrgamemv::Fallback fail = vrgamemv::Fallback::Upload;
+    m_ExtHudGuard = !grayThumbs;  // F6 只在不分塊時開（分塊版的縮圖是灰階、版面不同）
     if (!extFlowToTexture(d, fv, fvCyR, fvU0, &fail)) {
         stats.noteFallback(fail);
         return synthFlow(smallOk, hasMeta, meta, pts, fv, fvCyR, fvU0, grayThumbs);
@@ -2635,8 +2655,13 @@ bool XrVideo::extFlowToTexture(const float d[4], const float fv[4], float fvCyR,
     float step = static_cast<float>(std::clamp<int>(f.frameStep, 1, 4));
 
     pl_shader sh = pl_dispatch_begin(m_Dp);
-    pl_shader_desc sd[1] = {sampledTex("vs_mv", m_ExtMvTex)};
-    pl_shader_var sv[8] = {};
+    // F6：這一張與上一張的 1/8 縮圖（m_SmallCur＝這一張，同 synthFlow）。分塊版的縮圖是另一種版面、上一張不可用時關掉
+    const int curS = m_SmallCur;
+    float hud = (m_ExtHudGuard && m_HavePrevSmall && m_Small[curS] != nullptr && m_Small[curS ^ 1] != nullptr) ? 1.0f : 0.0f;
+    pl_tex hudCur = hud > 0.5f ? m_Small[curS] : m_ExtMvTex;
+    pl_tex hudPrev = hud > 0.5f ? m_Small[curS ^ 1] : m_ExtMvTex;
+    pl_shader_desc sd[3] = {sampledTex("vs_mv", m_ExtMvTex), sampledTex("vs_cur", hudCur), sampledTex("vs_prev", hudPrev)};
+    pl_shader_var sv[9] = {};
     sv[0].var = pl_var_vec3("vs_w");
     sv[0].data = wvec;
     sv[1].var = pl_var_vec2("vs_tan");
@@ -2653,6 +2678,8 @@ bool XrVideo::extFlowToTexture(const float d[4], const float fv[4], float fvCyR,
     sv[6].data = fsz;
     sv[7].var = pl_var_vec2("vs_gsz");
     sv[7].data = gsz;
+    sv[8].var = pl_var_float("vs_hud");
+    sv[8].data = &hud;
     for (pl_shader_var& v : sv) {
         v.dynamic = true;
     }
@@ -2662,9 +2689,9 @@ bool XrVideo::extFlowToTexture(const float d[4], const float fv[4], float fvCyR,
     cs.input = PL_SHADER_SIG_NONE;
     cs.output = PL_SHADER_SIG_COLOR;
     cs.descriptors = sd;
-    cs.num_descriptors = 1;
+    cs.num_descriptors = 3;
     cs.variables = sv;
-    cs.num_variables = 8;
+    cs.num_variables = 9;
     bool shOk = false;
     if (pl_shader_custom(sh, &cs)) {
         pl_dispatch_params dpar = {};

@@ -10,6 +10,9 @@ Google 雲端硬碟（資料夾「VipleStream logs」）。上傳成功後畫面
 - **匿名安裝 ID**：每個安裝隨機產生 8 碼，跟裝置與帳號無關，顯示在設定頁。測試者回報問題時報這個 ID，
   開發者用 `op=list&id=<ID>` 就能找到他的所有報告。手動上傳另外會顯示單份報告的 6 碼代碼。
 - 送出前兩端都會先遮掉 IP、MAC、電子郵件、電腦名稱、使用者名稱。
+- 報告本文最前面可能由 client 帶 `# summary:`（場次、解析度、編碼、平均 fps、loss、音訊）與
+  `# exit:`（crash 的實際原因：`unclean-exit`／`exception`）兩行。內容像 API 錯誤 JSON 或空白的上傳，
+  檔頭會多一行 `# invalid:`、檔名帶 `_invalid`，`op=list` 也會標 `invalid: true`。
 - 協定寫在 `Code.gs` 檔頭。
 
 ## 部署（只做一次）
@@ -37,6 +40,9 @@ curl -sL "$URL?op=ping"
 curl -sL "$URL?op=list&key=$READ_KEY"
 curl -sL "$URL?op=get&key=$READ_KEY&code=K7Q2MX" -o report.txt
 ```
+
+`get` 失敗時（HTTP 非 200 或回 `{"ok":false,…}`）要當成錯誤處理，不要把回應存成報告。
+本機的 `scripts/logdrop.sh get` 已改成這種行為（回非 0、不寫檔）。
 
 ## 限制
 

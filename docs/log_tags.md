@@ -109,7 +109,7 @@ Client log 位置：`%TEMP%\VipleStream-*.log`（檔名的數字是啟動時的 
 `ffmpeg.cpp:3163`
 
 ```
-[VIPLE-NET10] secs=%d received=%u decoded=%u networkDropped=%u decodeMeanMs p50=%.2f max=%.2f hostLatencyAvgMs p50=%.2f max=%.2f recvPct min=%.0f avg=%.0f fmt=0x%x
+[VIPLE-NET10] secs=%d received=%u decoded=%u networkDropped=%u decodeMeanMs p50=%.2f max=%.2f hostLatencyAvgMs p50=%.2f max=%.2f recvPct min=%.0f avg=%.0f fmt=0x%x dups=%u|n/a unused=%u
 ```
 
 | 欄位 | 意義 |
@@ -120,6 +120,8 @@ Client log 位置：`%TEMP%\VipleStream-*.log`（檔名的數字是啟動時的 
 | `hostLatencyAvgMs p50/max` | 同上；全無回報則整段印 `n/a` |
 | `recvPct min/avg` | 每秒 `received / fps × 100`。**`min` 是最有價值的欄位** —— 平均漂亮但 min 掉到 70 幾就代表有短促的收幀凹陷 |
 | `fmt` | 視訊格式 bitmask |
+| `dups`（2026-11-27 §LOGHYG-NET10） | 這 10 秒 host **重送上一張**的幀數：host 把「畫面沒更新」編成新幀時不帶 `frame_timestamp`，header 的 `frame_processing_latency` 就是 0（`Sunshine/src/stream.cpp` 的 `frame_is_dupe`）。這個 session 的 host 從沒報過非 0 延遲（舊 host／不報延遲的擷取路徑整場都是 0）就印 `n/a`——「0」不能當重複幀。靜態桌面／遊戲畫面暫停時 `dups≈received` 是正常的 |
+| `unused` | 這 10 秒 client **自己丟掉**的幀數（Pacer 佇列追不上時的主動捨棄，＝`pacerDroppedFrames`）。`received` 有到但 `decoded`/呈現少掉的部分先看這裡 |
 
 **停擺重建法**：NET10 每 10 個「視窗翻轉」印一次，而翻轉由幀抵達驅動，
 所以健康串流兩行相距 ~10 秒。超出的部分就是停擺：
@@ -140,20 +142,24 @@ Client log 位置：`%TEMP%\VipleStream-*.log`（檔名的數字是啟動時的 
 `ffmpeg.cpp:3374`。60 秒滑動視窗內 `recv<80%` 達 42/60 秒才觸發，冷卻 300 秒。
 
 - `cause=SERVER_LIMITED` —— 丟包 < 0.5%，代表 **server 根本沒產那麼多幀**
-  （遊戲效能不足或靜態畫面省流），切被動補幀救不了。
+  （遊戲效能不足、靜態畫面省流，或擷取／編碼跟不上），切被動補幀救不了。
+  2026-11-27 起（§LOGHYG-NET10）用同一份 60 秒視窗裡的 `hostRepeatFrames` 分辨：
+  多數（≥50%）是 host 重送的幀就當成**靜態畫面省流**，文案明講、也不跳畫面通知；
+  這個 host 不報延遲（`dups=n/a` 的情況）則不下結論，文案保持中性。
 - `cause=NETWORK` —— 真的是網路收幀不足。
 
 ### `[VIPLE-DEC-DEPTH]` —— 解碼器背壓
-`ffmpeg.cpp:2916`（事件）／`:2925`（heartbeat）
+`ffmpeg.cpp`（`decDepthLog` 事件；2026-11-27 起沒有 heartbeat 分支）
 
 ```
-[VIPLE-DEC-DEPTH] queueDepth=%d frameLatencyUs=%lld latRingMaxMs=%.2f [heartbeat]
+[VIPLE-DEC-DEPTH] queueDepth=%d frameLatencyUs=%lld latRingMaxMs=%.2f
 ```
 
 - `queueDepth` > 0 代表**背壓**（送進解碼器但還沒取回）。HEVC 期望 ~1，
   AV1 期望 ~12 屬 pipeline-deep，不算異常。
-- **帶 `heartbeat` 字尾 = 一切正常**，只是 60 秒一次的存活確認。
-  沒有 heartbeat 字尾的才是真事件（§LOGHYG-A4 改成事件驅動，同況每秒最多 1 行）。
+- 只在 `queueDepth>0` 或 `latRingMaxMs>8ms` 時印（§LOGHYG-A4 改成事件驅動，同況每秒最多 1 行）。
+  **2026-11-27（§LOGHYG-DECDEPTH）起移除每 60 秒一筆的 `heartbeat`**：一位使用者 7 小時只印了 28 行、
+  零資訊；整場沒有這一行就代表沒有背壓。
 - 2026-11-14 起這一行在這一幀交給 Pacer 之後才印（數值是交出去之前抄的），內容與出現條件不變。
 
 ### `[VIPLE-DEC-NOMEM]` —— 硬體解碼器配置不到記憶體（2026-11-23；2026-11-24 縮短等待）
@@ -435,7 +441,7 @@ Control message took over 10 ms to send (net latency: %u ms | packet loss: %f%%)
 | `[VIPLE-PREFS]` | 多處 | 設定載入／存檔 |
 | `AutoUpdateChecker` / `[AutoUpdateChecker]` | `backend/autoupdatechecker.cpp` | §UPDATE-HEAD 自動更新檢查（每次啟動、5 分鐘 debounce）：`HEAD https://github.com/…/releases/latest` → `HEAD 302 → …/releases/tag/vX`（免 API 配額）→ `up to date` / `update available (head)`；HEAD 失敗才退回 REST API：`GET … (If-None-Match)` → `API 200 OK` / `API 304 Not Modified`（**匿名 304 仍計入 60 次/小時/IP 配額**）/ `API rate limited … back-off until <epoch>`；不打網路時（`debounce`／`back-off`／`error`）用上次快取判斷。發佈當天第一次啟動就該看到 `update available`；沒有就看是哪一行。`--dev-update-url <base>`（只這次執行、不寫設定、不讀環境變數）改打 `<base>/releases/latest`，log：`dev GET …`、`[VIPLE-UPDATE] dev update url …`；不走 debounce、不寫 `autoupdate/*`、失敗不退回 GitHub 快取 |
 | `[SC-HID]` | `streaming/input/sc_hid.cpp` | Steam Controller 原生 HID 轉發（見下節；host 端同 tag） |
-| `[VIPLE-INPUT-STALL]` | `session.cpp`（watchdog 執行緒，**2.0.249 起只在 Windows**） | 主迴圈（鍵鼠唯一入口）停頓 ≥50 ms 且期間有使用者輸入（`GetLastInputInfo`）、本視窗在前景才記（每 10 ms 檢查）；`phase=SDL_WaitEventTimeout`＝卡在 SDL 內部，`phase=event 0x…`＝我們的 handler，`phase=loop-top`＝迴圈頂端。以前非 Windows 一律當作有輸入而誤報，2.0.249 起 watchdog 整段只在 Windows 編譯，其他平台不再印。**§INPUT-STALL 證據保存（2.0.249）**：停頓 300 ms 與 1000 ms 各抄一次主執行緒堆疊（暫停期間只複製堆疊，恢復後才展開；每格 `模組+RVA (符號+disp)`，最多 32 格；暫停當下迴圈已恢復時註明 `this stack is past the stall`），並抄 WCT 等待鏈（標出 `DEADLOCK CYCLE`；COM 等待只看得到停在 COM 節點）。行：`stall #N: main loop unresponsive N ms so far (phase=…)`、`main thread stack K at N ms (…):`、`wait chain (…)`、`recovered: main loop was unresponsive N ms (phase=…) #N`。同樣內容另存不輪替的 `input-stall.log`（log 目錄，Windows 是 `%TEMP%`；上限 1 MB，超過留後半 512 KB 並加 `[older entries trimmed]`），一般 log 輪替掉之後還找得到。手把熱插拔收掉 SC-HID 改成不阻塞主執行緒（`ScHidPassthrough::stopNonBlocking()`，讀取執行緒 1 秒內沒退出就遺棄）。影像由 Pacer 執行緒繪製，所以「畫面正常但鍵鼠斷續」要看這行 |
+| `[VIPLE-INPUT-STALL]` | `session.cpp`（watchdog 執行緒，**2.0.249 起只在 Windows**） | 主迴圈（鍵鼠唯一入口）停頓 ≥50 ms 且期間有使用者輸入（`GetLastInputInfo`）、本視窗在前景才記（每 10 ms 檢查）；`phase=SDL_WaitEventTimeout`＝卡在 SDL 內部，`phase=event 0x…`＝我們的 handler，`phase=loop-top`＝迴圈頂端。以前非 Windows 一律當作有輸入而誤報，2.0.249 起 watchdog 整段只在 Windows 編譯，其他平台不再印。**§INPUT-STALL 證據保存（2.0.249）**：停頓 300 ms 與 1000 ms 各抄一次主執行緒堆疊（暫停期間只複製堆疊，恢復後才展開；每格 `模組+RVA (符號+disp)`，最多 32 格；暫停當下迴圈已恢復時註明 `this stack is past the stall`），並抄 WCT 等待鏈（標出 `DEADLOCK CYCLE`；COM 等待只看得到停在 COM 節點）。行：`stall #N: main loop unresponsive N ms so far (phase=…)`、`main thread stack K at N ms (…):`、`wait chain (…)`、`recovered: main loop was unresponsive N ms (phase=…) #N`。**§LOGHYG-STALL（2026-11-27）**：完整堆疊只在這次執行第一次停頓、之後每 60 秒最多一筆；其餘停頓只印觸發行（`[VIPLE-INPUT-STALL] main loop unresponsive N ms with user input pending (phase=…) #N`）與 `recovered` 行，`input-stall.log` 也只收真的有抄堆疊的那幾筆（實測 90 分鐘 19 次、單檔 454 行 → 約 50 行）。同樣內容另存不輪替的 `input-stall.log`（log 目錄，Windows 是 `%TEMP%`；上限 1 MB，超過留後半 512 KB 並加 `[older entries trimmed]`），一般 log 輪替掉之後還找得到。手把熱插拔收掉 SC-HID 改成不阻塞主執行緒（`ScHidPassthrough::stopNonBlocking()`，讀取執行緒 1 秒內沒退出就遺棄）。影像由 Pacer 執行緒繪製，所以「畫面正常但鍵鼠斷續」要看這行 |
 | `[VIPLE-INPUT-GAP]` / `[VIPLE-INPUT-QUEUE-LAG]` / `[VIPLE-INPUT-SENDINPUT-SLOW]` | **host** `stream.cpp` / `input.cpp` / `platform/windows/input.cpp` | 輸入封包到達間隔 >150 ms（前 1 秒 ≥30 包才算）／task_pool 排隊 ≥50 ms／`SendInput` ≥20 ms（被其他行程的 low-level hook 卡住）。四者對時可分辨停頓在 client、傳輸還是 host 注入 |
 | `[VIPLE-QLOG] §S.19 cooldown armed f=N (K.14 pending\|skipped)` / `IDR-REQ` / `IDR-EMIT` / `IDR-SUPPRESS` | **host** `video.cpp` encode_run | IDR cooldown 閘門：`armed` 標示本 encoder 生命期起點（`K.14 skipped: rebuilt encoder`＝顯示拓樸切換後重建）；client 要 IDR 卻只見 SUPPRESS、無 EMIT 就是 §S.19-INIT-FIX 修掉的永久凍結型態。`IDR-EMIT f=1 (opening, cooldown not started)`＝session 開場 host 自己要的那一張，不啟動冷卻（§IDR-OPEN，2026-11-14）；`§K.14` 第 16 幀的重送同樣不重設冷卻。開場之後 client 的第一個 `IDR-REQ` 應該緊接同一幀的 `IDR-EMIT … (cooldown OK)`。**2.0.245 起（§IDR-FAST）桌面 session 不再丟請求**：平常最短間隔 250 ms、10 秒內送滿 3 張後 1500 ms，落在間隔內的印 `IDR-DEFER …`、到期印 `IDR-EMIT … (deferred request)`；壅塞提示另印 `IDR-GAP congestion hint on|off`（§P2）。`IDR-SUPPRESS` 只剩 VR session 會印。細節見第 4 節「2D 丟包後的恢復」 |
 | `[VIPLE-UPDATE]` | **host** `self_update.cpp` / `system_tray.cpp` | §SELF-UPDATE 常駐圖示兩段式「Check for updates...」→「Install update vX」與 CLI `--check-update`／`--self-update [--force] [package]`：`latest via HEAD: X`（github.com 302 取 tag，免 API 配額）／`falling back to API`／`up to date`／`update available: A → B`／`downloaded … bytes`／`sha256 verified`（GitHub asset digest，拿不到就拒裝）／`updater launched (pid N) … service=1`（Windows：PowerShell 腳本在 `<install>/config/update`，停 service→rename .old→覆蓋→啟 service，失敗回滾；細節在 `config/self_update.log`）／`sudo path rc=` `pkexec path rc=`（Linux：apt-get install .deb；細節在 `~/.config/sunshine/self_update.log`）／`self-update completed: now running X` 或 `last self-update failed: …`（重啟後讀 result 檔）。**§UPDATE-NOTES-TRAY（2.0.252）**：常駐圖示的「有新版」通知多一行這一版的標題——每個新版號在一個行程裡只多查一次 `releases/tags/v<ver>`（逾時 10 秒；查失敗也算查過，不重查，保住匿名 API 配額），依 web 設定頁的語系（`locale` 以 `zh` 開頭取中文段）在 release notes 的 `# 繁體中文` 分隔行切段、取該段第一個 `## ` 標題（沒有分隔行就用唯一的那段，選定那段沒標題就退回另一段），截到 120 字元、通知內文放不下就不接：`release notes summary for vX (zh\|en): …\|<none>`／`release notes for vX not available (…)`；查詢期間按「Install update」會回 `Still finishing the update check. Try again in a moment.`。**Linux 更新授權（2.0.252）**：.deb 附固定路徑的 helper `<prefix>/libexec/viplestream-server/self-update` 與 polkit 政策 `<datadir>/polkit-1/actions/app.viplestream.server.self-update.policy`（action `app.viplestream.server.self-update`，三種情境都是 `auth_admin`），pkexec 的授權對話框顯示看得懂的說明；helper 必須是 root 擁有、group／other 不可寫才用，否則退回寫到使用者目錄的內嵌腳本：`installer: helper …\|embedded script …`。prefix 不是 `/usr` 時政策檔不生效（pkexec 顯示預設提示）；FreeBSD、AppImage、Flatpak 不用 helper |

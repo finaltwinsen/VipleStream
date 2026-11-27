@@ -20,6 +20,10 @@
  * 回應（POST 會先 302 到 googleusercontent.com，client 照常跟隨轉址改用 GET 取回）：
  *   {"ok": true, "code": "K7Q2MX"} 或 {"ok": false, "error": "<原因>"}
  *
+ * 報告本文（payload）可以由 client 在最前面自己帶 `# summary: …` 與 `# exit: …` 兩行；
+ * 收件端只負責搬運，不解析。內容像 API 錯誤 JSON 或空白的上傳會在檔頭標 `# invalid:`，
+ * 檔名加 `_invalid`，`op=list` 也會回 `invalid: true`。
+ *
  * 讀取（GET）：
  *   ?op=ping                          → {"ok":true,"service":"viplestream-logdrop","v":1}（不用金鑰）
  *   ?op=list&key=<READ_KEY>[&n=50][&id=<install_id>] → 最近的檔案清單（帶 id 只列該安裝的）
@@ -76,6 +80,7 @@ function doPost(e) {
 
     var now = new Date();
     var code = newCode_();
+    var invalid = invalidReason_(text, req.app_version);
     var header = [
       '# VipleStream logdrop v' + PROTOCOL,
       '# code: ' + code,
@@ -85,10 +90,15 @@ function doPost(e) {
       '# device: ' + clip_(req.device, 200),
       '# install_id: ' + installId,
       '# trigger: ' + trigger,
-      '# note: ' + clip_(req.note, 2000).replace(/\r?\n/g, '\n#   '),
-      ''
-    ].join('\n');
-    var name = Utilities.formatDate(now, TIME_ZONE, 'yyyyMMdd-HHmmss') + '_' + source + '_' + (installId || 'anon') + '_' + code + '.txt';
+      '# note: ' + clip_(req.note, 2000).replace(/\r?\n/g, '\n#   ')
+    ];
+    if (invalid) {
+      header.push('# invalid: ' + invalid);
+    }
+    header.push('');
+    header = header.join('\n');
+    var name = Utilities.formatDate(now, TIME_ZONE, 'yyyyMMdd-HHmmss') + '_' + source + '_' + (installId || 'anon') + '_' + code
+        + (invalid ? '_invalid' : '') + '.txt';
     folder_().createFile(name, header + '\n' + text, MimeType.PLAIN_TEXT);
     return json_({ok: true, code: code});
   } catch (err) {
@@ -117,7 +127,13 @@ function doGet(e) {
     var it = id ? folder_().searchFiles("title contains '_" + id + "_'") : folder_().getFiles();
     while (it.hasNext()) {
       var f = it.next();
-      files.push({name: f.getName(), size: f.getSize(), created: f.getDateCreated().toISOString()});
+      var fileName = f.getName();
+      files.push({
+        name: fileName,
+        size: f.getSize(),
+        created: f.getDateCreated().toISOString(),
+        invalid: /_invalid\.txt$/.test(fileName)
+      });
     }
     files.sort(function (a, b) { return a.created < b.created ? 1 : -1; });
     return json_({ok: true, files: files.slice(0, n)});
@@ -128,6 +144,10 @@ function doGet(e) {
       return json_({ok: false, error: 'bad_code'});
     }
     var found = folder_().searchFiles("title contains '_" + code + ".txt'");
+    if (!found.hasNext()) {
+      // §LOGDROP-1127：invalid 的檔名是 `_<code>_invalid.txt`，上面那個樣式找不到。
+      found = folder_().searchFiles("title contains '_" + code + "_invalid.txt'");
+    }
     if (!found.hasNext()) {
       return json_({ok: false, error: 'not_found'});
     }
@@ -150,6 +170,41 @@ function decodePayload_(encoding, payload) {
     return Utilities.ungzip(blob).getDataAsString('UTF-8');
   }
   return null;
+}
+
+/**
+ * §LOGDROP-1127：下載端曾把 `{"ok":false,...}` 這種 API 錯誤存成 log 檔（沒有檔頭、之後無法分析）。
+ * 上傳內容若明顯不是報告，就在檔頭與清單標成 invalid；使用者仍拿得到代碼，開發者不必點開才知道。
+ */
+function invalidReason_(text, appVersion) {
+  var t = text === null || text === undefined ? '' : String(text);
+  if (t.length === 0) {
+    return 'empty';
+  }
+  // 有些工具會在檔頭塞 BOM；先去掉再判斷是不是 JSON。用碼點比對，避免原始碼裡出現看不見的字元。
+  if (t.charCodeAt(0) === 0xFEFF) {
+    t = t.substring(1);
+  }
+  t = t.replace(/^\s+/, '');
+  if (/^\{\s*"ok"\s*:/.test(t) || /^\{\s*"error"\s*:/.test(t)) {
+    return 'api-error-json';
+  }
+  if (t.charAt(0) === '{' && t.length < 8192) {
+    try {
+      var parsed = JSON.parse(t);
+      if (parsed && typeof parsed === 'object' && ('ok' in parsed || 'error' in parsed)) {
+        return 'api-error-json';
+      }
+    } catch (ignored) {
+      // 不是完整 JSON 就當一般內容。
+    }
+  }
+  // 每個 client 都會帶 app_version；沒有代表這是舊版或非預期來源，先標起來但不拒收。
+  var version = appVersion === undefined || appVersion === null ? '' : String(appVersion).trim();
+  if (version.length === 0) {
+    return 'missing-app-version';
+  }
+  return '';
 }
 
 function takeQuota_(installId) {

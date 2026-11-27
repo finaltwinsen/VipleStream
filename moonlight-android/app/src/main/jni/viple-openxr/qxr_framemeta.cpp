@@ -12,6 +12,27 @@ std::atomic<uint32_t> warpFromRenderRot{0};
 std::atomic<uint32_t> warpFromSent{0};
 std::atomic<uint32_t> warpRenderRotRejected{0};
 
+// §LOGHYG-VITURE（2026-11-27）：renderRot 與上傳那筆的實際夾角。這是唯一能分辨「固定座標偏移
+// （例如 180°，p50 幾乎等於 max）」與「姿態真的一直在動、只是比錯筆（p50 遠小於 max）」的訊號。
+// 只有比對過（renderRot 與 sent 都在）的幀才記；10 秒統計時取走。
+std::mutex g_warpAngleLock;
+std::vector<float> g_warpAngleDeg;
+constexpr size_t kWarpAngleCap = 8192;
+
+void noteWarpAngleDeg(float deg)
+{
+    std::lock_guard<std::mutex> guard(g_warpAngleLock);
+    if (g_warpAngleDeg.size() < kWarpAngleCap) {
+        g_warpAngleDeg.push_back(deg);
+    }
+}
+
+void takeWarpAnglesDeg(std::vector<float>& out)
+{
+    std::lock_guard<std::mutex> guard(g_warpAngleLock);
+    out.swap(g_warpAngleDeg);
+}
+
 void noteFrameAge(float ageMs)
 {
     if (!(ageMs > 0.0f) || ageMs > 500.0f) {
@@ -30,6 +51,7 @@ float qxrFrameAgeEmaMs()
 #include <android/log.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <ctime>
 #include <time.h>
 
@@ -87,10 +109,20 @@ void QxrFrameMeta::logLine(const char* prefix, const Interval& stats, std::vecto
     const uint32_t fromRr = warpFromRenderRot.exchange(0, std::memory_order_relaxed);
     const uint32_t fromSent = warpFromSent.exchange(0, std::memory_order_relaxed);
     const uint32_t rejected = warpRenderRotRejected.exchange(0, std::memory_order_relaxed);
+    std::vector<float> warpAngles;
+    takeWarpAnglesDeg(warpAngles);
+    char angleBuf[112] = "";
+    if (!warpAngles.empty()) {
+        std::sort(warpAngles.begin(), warpAngles.end());
+        const float a50 = warpAngles[warpAngles.size() / 2];
+        const float aMax = warpAngles.back();
+        std::snprintf(angleBuf, sizeof(angleBuf), " angleDeg p50=%.1f max=%.1f n=%u",
+                      a50, aMax, static_cast<unsigned>(warpAngles.size()));
+    }
     if (fromRr + fromSent + rejected > 0) {
         __android_log_print(ANDROID_LOG_INFO, "viple-openxr",
-                            "[VIPLE-VITURE] warp pose source: renderRot=%u sent=%u renderRotRejected=%u",
-                            fromRr, fromSent, rejected);
+                            "[VIPLE-VITURE] warp pose source: renderRot=%u sent=%u renderRotRejected=%u%s",
+                            fromRr, fromSent, rejected, angleBuf);
     }
 }
 
@@ -164,6 +196,14 @@ bool QxrFrameMeta::lookupRenderPose(int64_t ptsUs, float q[4]) const
         bool trust = true;
         if (haveSent) {
             const float dot = std::fabs(rr[0] * sent[0] + rr[1] * sent[1] + rr[2] * sent[2] + rr[3] * sent[3]);
+            // §LOGHYG-VITURE：把實際夾角記下來（q 與 −q 已由 fabs 視為同一個旋轉）。夾角本身
+            // 不代表比較方式有錯——座標系／重新置中是真的偏移、或是比到不同時間的姿態，都會讓它變大。
+            // 這裡只量測、不改判斷（p50≈max 且接近固定值＝固定偏移；分布很寬＝姿態在動）。
+            if (std::isfinite(dot)) {
+                const float clamped = std::min(dot, 1.0f);
+                const float angleDeg = 2.0f * std::acos(clamped) * 57.29577951f;
+                noteWarpAngleDeg(angleDeg);
+            }
             trust = dot >= 0.9914f;  // cos(15°/2)
         }
         if (trust) {

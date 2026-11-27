@@ -989,6 +989,45 @@ namespace nvhttp {
 
 #ifdef _WIN32
   namespace {
+    // §LOGDROP-1127：顯示狀態查詢連續失敗時指數退避（1→5→30 秒）。/serverinfo 每 1～2 秒被輪詢，
+    // 以前每次都會呼叫 libdisplaydevice 而洗版；現在失敗後暫時跳過查詢，同一原因只印第一次與每 60 秒一行。
+    class dd_query_backoff_t {
+    public:
+      bool allow() {
+        std::lock_guard lk {mtx_};
+        return std::chrono::steady_clock::now() >= retry_at_;
+      }
+
+      void note_success() {
+        std::lock_guard lk {mtx_};
+        failures_ = 0;
+        retry_at_ = {};
+        reason_.clear();
+      }
+
+      void note_failure(std::string reason) {
+        std::lock_guard lk {mtx_};
+        const auto now = std::chrono::steady_clock::now();
+        ++failures_;
+        const auto delay = failures_ <= 1 ? std::chrono::seconds(1) : failures_ == 2 ? std::chrono::seconds(5) : std::chrono::seconds(30);
+        retry_at_ = now + delay;
+        if (failures_ == 1 || reason != reason_ || now - last_log_ >= std::chrono::seconds(60)) {
+          BOOST_LOG(warning) << "[VIPLE-RES] display query failed (" << failures_ << " consecutive, retrying every " << delay.count()
+                             << "s): " << reason;
+          last_log_ = now;
+          reason_ = std::move(reason);
+        }
+      }
+
+    private:
+      std::mutex mtx_;
+      int failures_ = 0;
+      std::chrono::steady_clock::time_point retry_at_ {};
+      std::chrono::steady_clock::time_point last_log_ {};
+      std::string reason_;
+    };
+
+    dd_query_backoff_t dd_query_backoff;
     // §H.4-SWITCH：dd 會在串流前切換的目標裝置，其「可切換最高模式」。
     struct switchable_mode_t {
       std::string display_name;
@@ -1021,8 +1060,20 @@ namespace nvhttp {
         return hit;
       }
 
+      // §LOGDROP-1127：連續失敗的退避期間直接跳過查詢（libdisplaydevice 才不會被 /serverinfo 輪詢洗版）
+      if (!dd_query_backoff.allow()) {
+        cached.reset();
+        return std::nullopt;
+      }
+
       std::string display_name;
-      for (const auto &device : display_device::enumerate_devices()) {
+      const auto devices = display_device::enumerate_devices();
+      if (devices.empty()) {
+        dd_query_backoff.note_failure("display enumeration returned no devices");
+      } else {
+        dd_query_backoff.note_success();
+      }
+      for (const auto &device : devices) {
         const bool match = device.m_device_id == output_name ||
                            (!device.m_display_name.empty() && device.m_display_name == output_name);
         if (match && device.m_info && !device.m_display_name.empty()) {
@@ -1069,6 +1120,7 @@ namespace nvhttp {
         dm.dmSize = sizeof(dm);
       }
       if (best_area <= 0 || best.refresh_hz <= 1) {
+        dd_query_backoff.note_failure("EnumDisplaySettingsW returned no usable modes for " + display_name);
         if (serverinfo_dd_gate.should_log("nomodes/" + display_name)) {  // §PERF-1113-R2（A12）：同上
           BOOST_LOG(warning) << "[VIPLE-RES] EnumDisplaySettingsW(" << display_name
                              << ") returned no usable modes; falling back to primary current mode";
@@ -1078,6 +1130,7 @@ namespace nvhttp {
       }
 
       serverinfo_dd_gate.note("ok");  // 之後又找不到時要再印
+      dd_query_backoff.note_success();
       cached = best;
       cached_key = output_name;
       cached_at = now;
@@ -1085,6 +1138,22 @@ namespace nvhttp {
     }
   }  // namespace
 #endif
+
+  /**
+   * @brief §LOGDROP-1127：/launch／/resume 的 503 訊息要能分辨「找不到顯示器」與「找不到 encoder」。
+   *        client 會直接顯示這一句；錯誤碼維持 503（舊 client 相容）。
+   *        判斷依據是 video::probe_encoders() 留下的失敗原因。
+   */
+  static std::string probe_failure_status_message() {
+    switch (video::last_probe_failure()) {
+      case video::probe_failure_e::display:
+        return "Host has no active display. Connect or power on a monitor (or a virtual display) on the host, then try again.";
+      case video::probe_failure_e::encoder:
+        return "Host has no usable video encoder for the requested codec and resolution. Check the GPU driver and encoder settings on the host.";
+      default:
+        return "Failed to initialize video capture/encoding. Is a display connected and turned on?";
+    }
+  }
 
   template<class T>
   void serverinfo(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
@@ -1386,7 +1455,20 @@ namespace nvhttp {
         // §PERF-1113-R2（A12）：先收起來，整組內容和上次不同才印
         std::string res_key = "primary";
         std::vector<std::string> res_modes;
+#ifdef _WIN32
+        // §LOGDROP-1127：和上面的 switchable 查詢共用退避；失敗期間不再呼叫 display_device
+        display_device::EnumeratedDeviceList enumerated;
+        if (dd_query_backoff.allow()) {
+          enumerated = display_device::enumerate_devices();
+          if (enumerated.empty()) {
+            dd_query_backoff.note_failure("display enumeration returned no devices");
+          } else {
+            dd_query_backoff.note_success();
+          }
+        }
+#else
         const auto enumerated = display_device::enumerate_devices();
+#endif
         for (const auto &device : enumerated) {
           if (!device.m_info || !device.m_info->m_primary) {
             continue;  // skip inactive / non-primary outputs
@@ -2090,12 +2172,12 @@ namespace nvhttp {
         vr_scope.emplace();
         const auto shape = vr_shape_of(*vr_params);
         if (video::probe_encoders(1, &shape)) {
-          put_vr_error(tree, false, 503, VIPLE_VR_ERR_BUSY, "VR encoder probe failed");
+          put_vr_error(tree, false, 503, VIPLE_VR_ERR_BUSY, probe_failure_status_message());
           return;
         }
       } else if (video::probe_encoders()) {
         tree.put("root.<xmlattr>.status_code", 503);
-        tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
+        tree.put("root.<xmlattr>.status_message", probe_failure_status_message());
         tree.put("root.gamesession", 0);
 
         return;
@@ -2411,7 +2493,7 @@ namespace nvhttp {
       if (probe_rc) {
         tree.put("root.resume", 0);
         tree.put("root.<xmlattr>.status_code", 503);
-        tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
+        tree.put("root.<xmlattr>.status_message", probe_failure_status_message());
 
         return;
       }

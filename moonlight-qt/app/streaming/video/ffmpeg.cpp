@@ -1854,6 +1854,7 @@ void FFmpegVideoDecoder::addVideoStats(VIDEO_STATS& src, VIDEO_STATS& dst)
     dst.totalFrames += src.totalFrames;
     dst.networkDroppedFrames += src.networkDroppedFrames;
     dst.pacerDroppedFrames += src.pacerDroppedFrames;
+    dst.hostRepeatFrames += src.hostRepeatFrames;
     dst.totalReassemblyTimeUs += src.totalReassemblyTimeUs;
     dst.totalDecodeTimeUs += src.totalDecodeTimeUs;
     dst.totalPacerTimeUs += src.totalPacerTimeUs;
@@ -4570,11 +4571,12 @@ void FFmpegVideoDecoder::decoderThreadProc()
                         // §LOGHYG-A4 — 舊 1/120 採樣制實測 41k 筆 100%
                         // queueDepth=0（零資訊量），改事件驅動：只在
                         // queueDepth>0（back-pressure）或 latRingMaxMs>8ms 時
-                        // 印（同況最多 1 行/秒），另每 60 秒一筆 heartbeat
-                        // 確認機制存活。static 跨 decoder 實例共用（單一
-                        // decode thread，無 race；沿用上面 latency ring 慣例）。
+                        // 印（同況最多 1 行/秒）。
+                        // §LOGHYG-DECDEPTH（2026-11-27）：每 60 秒一筆的 heartbeat
+                        // 已移除（一位使用者 7 小時印了 28 行、零資訊；沒有事件就代表
+                        // 沒有背壓）。static 跨 decoder 實例共用（單一 decode thread，
+                        // 無 race；沿用上面 latency ring 慣例）。
                         static uint32_t s_DecDepthLastEventMs = 0;
-                        static uint32_t s_DecDepthLastBeatMs = 0;
                         const uint32_t depthNowMs = SDL_GetTicks();
                         const bool depthAbnormal =
                             m_FrameInfoQueue.size() > 0 || maxLatMs > 8.0;
@@ -4582,11 +4584,6 @@ void FFmpegVideoDecoder::decoderThreadProc()
                                 depthNowMs - s_DecDepthLastEventMs >= 1000) {
                             decDepthLog = 1;
                             s_DecDepthLastEventMs = depthNowMs;
-                            s_DecDepthLastBeatMs = depthNowMs;
-                        }
-                        else if (depthNowMs - s_DecDepthLastBeatMs >= 60000) {
-                            decDepthLog = 2;
-                            s_DecDepthLastBeatMs = depthNowMs;
                         }
                         if (decDepthLog != 0) {
                             decDepthQueue = (int)m_FrameInfoQueue.size();
@@ -4609,9 +4606,8 @@ void FFmpegVideoDecoder::decoderThreadProc()
                     if (decDepthLog != 0) {
                         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                                     "[VIPLE-DEC-DEPTH] queueDepth=%d "
-                                    "frameLatencyUs=%lld latRingMaxMs=%.2f%s",
-                                    decDepthQueue, decDepthLatencyUs, decDepthRingMaxMs,
-                                    decDepthLog == 2 ? " heartbeat" : "");
+                                    "frameLatencyUs=%lld latRingMaxMs=%.2f",
+                                    decDepthQueue, decDepthLatencyUs, decDepthRingMaxMs);
                     }
                     if (pollStats) {
                         vrPollMaybeLog(receivedAtUs);  // §VR-DECPOLL：這一幀已經交出去了
@@ -4911,6 +4907,9 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         sec.decodedFrames = m_ActiveWndVideoStats.decodedFrames;
         sec.networkDroppedFrames = m_ActiveWndVideoStats.networkDroppedFrames;
         sec.totalFrames = m_ActiveWndVideoStats.totalFrames;
+        sec.hostRepeatFrames = m_ActiveWndVideoStats.hostRepeatFrames;
+        sec.hostLatFrames = m_ActiveWndVideoStats.framesWithHostProcessingLatency;
+        sec.pacerDroppedFrames = m_ActiveWndVideoStats.pacerDroppedFrames;
         sec.decodeMeanMs = decodeMeanMsLocal;
         // 無 host latency 回報記 -1（印 n/a），跟真的 0.00ms 區分。
         sec.hostLatAvgMs = m_ActiveWndVideoStats.framesWithHostProcessingLatency > 0
@@ -4977,6 +4976,7 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                 // 10 秒彙總 — 此刻 ring 正好是這一批的 10 秒。
                 m_NetSecsSinceAggregate = 0;
                 uint32_t sumRecv = 0, sumDec = 0, sumDrop = 0;
+                uint32_t sumDup = 0, sumHostLat = 0, sumUnused = 0;
                 double decVals[k_NetRingSize];
                 double hostVals[k_NetRingSize];
                 int nDec = 0, nHost = 0;
@@ -4987,6 +4987,9 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                     sumRecv += s.receivedFrames;
                     sumDec += s.decodedFrames;
                     sumDrop += s.networkDroppedFrames;
+                    sumDup += s.hostRepeatFrames;
+                    sumHostLat += s.hostLatFrames;
+                    sumUnused += s.pacerDroppedFrames;
                     decVals[nDec++] = s.decodeMeanMs;
                     if (s.hostLatAvgMs >= 0.0) {
                         hostVals[nHost++] = s.hostLatAvgMs;
@@ -5019,14 +5022,24 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                 else {
                     snprintf(pctBuf, sizeof(pctBuf), "n/a");
                 }
+                // §LOGHYG-NET10：dups＝host 重送上一張的幀（header 沒帶處理延遲＝0）。
+                // 這一窗沒有非 0 延遲、這個 host 也從沒報過 → n/a（舊 host／不報延遲的擷取路徑整場都是 0，
+                // 不能拿來當重複幀）。unused＝client 自己丟掉的幀（Pacer 追不上時的主動捨棄）。
+                char dupBuf[32];
+                if (sumHostLat > 0 || m_HostLatReported) {
+                    snprintf(dupBuf, sizeof(dupBuf), "%u", sumDup);
+                }
+                else {
+                    snprintf(dupBuf, sizeof(dupBuf), "n/a");
+                }
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                             "[VIPLE-NET10] secs=%d received=%u decoded=%u "
                             "networkDropped=%u decodeMeanMs p50=%.2f max=%.2f "
-                            "hostLatencyAvgMs %s recvPct %s fmt=0x%x",
+                            "hostLatencyAvgMs %s recvPct %s fmt=0x%x dups=%s unused=%u",
                             m_NetRingCount, sumRecv, sumDec, sumDrop,
                             nDec > 0 ? decVals[nDec / 2] : 0.0,
                             nDec > 0 ? decVals[nDec - 1] : 0.0,
-                            hostBuf, pctBuf, m_VideoFormat);
+                            hostBuf, pctBuf, m_VideoFormat, dupBuf, sumUnused);
                 if (m_StreamFps > 0) {
                     // §LOGHYG-A3 — mode 標籤跟實際 FRUC 狀態走：FRUC 全關時
                     // isPassiveFrucMode()/effectiveFrucRatio() 是 stub 預設值
@@ -5190,6 +5203,7 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                 // 擋），訊息不再誤導使用者去改設定。
                 m_WarnWndRecv[m_WarnWndIdx] = m_ActiveWndVideoStats.receivedFrames;
                 m_WarnWndDrop[m_WarnWndIdx] = m_ActiveWndVideoStats.networkDroppedFrames;
+                m_WarnWndDup[m_WarnWndIdx] = m_ActiveWndVideoStats.hostRepeatFrames;
                 m_WarnWndIdx = (m_WarnWndIdx + 1) % 60;
                 if (m_WarnWndFill < 60) {
                     m_WarnWndFill++;
@@ -5207,10 +5221,11 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                 }
 
                 if (lowSecs >= 42 && m_RatioWarnCooldownSec == 0) {
-                    uint64_t recvSum = 0, dropSum = 0;
+                    uint64_t recvSum = 0, dropSum = 0, dupSum = 0;
                     for (int i = 0; i < m_WarnWndFill; i++) {
                         recvSum += m_WarnWndRecv[i];
                         dropSum += m_WarnWndDrop[i];
+                        dupSum += m_WarnWndDup[i];
                     }
                     const uint64_t wndFrames = recvSum + dropSum;
                     const int avgRecvFps = m_WarnWndFill > 0
@@ -5219,14 +5234,31 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                     // 避免浮點：dropSum×200 < wndFrames）。
                     const bool serverLimited =
                         wndFrames > 0 && dropSum * 200 < wndFrames;
+                    // §LOGHYG-NET10：host 重送上一張的幀（header 沒帶延遲＝0）占收到的比例。
+                    // -1＝這個 host 不報延遲、無法分辨；≥50% ⇒ 靜態畫面省流，不是主機跟不上。
+                    const int dupPct = (serverLimited && m_HostLatReported && recvSum > 0)
+                        ? (int)(dupSum * 100 / recvSum) : -1;
+                    const bool mostlyRepeat = dupPct >= 50;
 
                     char warnMsg[512];
-                    if (serverLimited) {
+                    if (serverLimited && mostlyRepeat) {
                         snprintf(warnMsg, sizeof(warnMsg),
-                                 "伺服器實際輸出僅 ~%d fps（設定 %d fps）："
-                                 "近 60 秒 %d 秒低收但丟包≈0，"
-                                 "多半是遊戲效能不足或靜態畫面省流，非網路問題。",
-                                 avgRecvFps, m_StreamFps, lowSecs);
+                                 "主機實際輸出僅 ~%d fps（設定 %d fps）："
+                                 "近 60 秒 %d 秒低收但丟包≈0，其中約 %d%% 是主機重送上一張"
+                                 "（靜態畫面省流）。這是正常的省流行為，不是網路問題。",
+                                 avgRecvFps, m_StreamFps, lowSecs, dupPct);
+                    }
+                    else if (serverLimited) {
+                        // §LOGHYG-NET10：分辨不出重複幀時不下結論（舊 host 不報延遲），
+                        // 文案保持中性——「主機跟不上」只是其中一種可能。
+                        snprintf(warnMsg, sizeof(warnMsg),
+                                 "主機實際輸出僅 ~%d fps（設定 %d fps）："
+                                 "近 60 秒 %d 秒低收但丟包≈0，%s"
+                                 "與網路無關，切被動補幀也救不了。",
+                                 avgRecvFps, m_StreamFps, lowSecs,
+                                 dupPct >= 0
+                                     ? "可能是主機擷取／編碼跟不上或遊戲本身更新慢；"
+                                     : "可能是靜態畫面省流、主機擷取／編碼跟不上，或遊戲本身更新慢；");
                     }
                     else {
                         snprintf(warnMsg, sizeof(warnMsg),
@@ -5247,8 +5279,10 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
                     // emulation 佔用（同 clConnectionStatusUpdate 的兩道檢
                     // 查）；SERVER_LIMITED 屬環境常態（靜態畫面省流也會低
                     // 收），overlay 每 session 只跳一次，log 照冷卻節奏記。
+                    // §LOGHYG-NET10：已判定是多數為 host 重送幀（靜態畫面省流）時只記 log，不提示使用者。
                     const bool overlayAllowed = Session::get() &&
                         Session::get()->shouldShowStatusOverlayWarning() &&
+                        !mostlyRepeat &&
                         (!serverLimited || !m_RatioWarnSrvLtdOverlayShown);
                     if (overlayAllowed) {
                         if (serverLimited) {
@@ -5327,6 +5361,7 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
         if (!isVrSession()) {
             recordHostSample((double)du->frameHostProcessingLatency / 10.0);
         }
+        m_HostLatReported = true;  // §LOGHYG-NET10：這個 host 會報延遲，「0」才可信地代表重送幀
         if (m_ActiveWndVideoStats.minHostProcessingLatency != 0) {
             m_ActiveWndVideoStats.minHostProcessingLatency = qMin(m_ActiveWndVideoStats.minHostProcessingLatency, du->frameHostProcessingLatency);
         }
@@ -5334,6 +5369,11 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
             m_ActiveWndVideoStats.minHostProcessingLatency = du->frameHostProcessingLatency;
         }
         m_ActiveWndVideoStats.framesWithHostProcessingLatency += 1;
+    }
+    else {
+        // §LOGHYG-NET10：host 重送上一張時不帶 frame_timestamp，header 的處理延遲就是 0
+        // （Sunshine stream.cpp 的 frame_is_dupe）。等 host 至少報過一次非 0 才把它當重複幀。
+        m_ActiveWndVideoStats.hostRepeatFrames++;
     }
     m_ActiveWndVideoStats.maxHostProcessingLatency = qMax(m_ActiveWndVideoStats.maxHostProcessingLatency, du->frameHostProcessingLatency);
     m_ActiveWndVideoStats.totalHostProcessingLatency += du->frameHostProcessingLatency;

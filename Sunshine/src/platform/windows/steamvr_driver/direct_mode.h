@@ -182,6 +182,13 @@ namespace vrdrv {
     double stat_interval_max_ms_ = 0.0;
     layer_t stat_last_l0_ {};  // 最近一次的第 0 層（10 秒行印投影與 bounds，診斷用）
     bool stat_have_l0_ = false;
+    // §LOGDROP-1127：layer0 的四行只在來源（pid／尺寸／格式）或姿態變化超過門檻時印（每眼各記一份）
+    bool l0_log_valid_[2] = {false, false};
+    uint32_t l0_log_pid_[2] = {0, 0};
+    uint32_t l0_log_w_[2] = {0, 0};
+    uint32_t l0_log_h_[2] = {0, 0};
+    uint32_t l0_log_fmt_[2] = {0, 0};
+    float l0_log_pose_[2][3] = {};
   };
 
 }  // namespace vrdrv

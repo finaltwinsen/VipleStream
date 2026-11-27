@@ -14,6 +14,7 @@
 #include <QFontDatabase>
 #include <QCursor>
 #include <QElapsedTimer>
+#include <QFileInfo>
 #include <QTemporaryFile>
 #include <QRegularExpression>
 #include <QTimer>
@@ -513,6 +514,24 @@ void ffmpegLogToDiskHandler(void* ptr, int level, const char* fmt, va_list vl)
 
 static UINT s_HitUnhandledException = 0;
 
+// §LOGDROP-1127：當機處理常式寫完 dump 後要把最後幾行刷進檔，下次啟動才讀得到 `.dmp` 檔名。
+// 不能用 vipleFlushLogFile()：它會無限期等寫入鎖；當掉的就是日誌執行緒時會永遠卡住，WER 收不到 dump。
+static void flushLogFileForCrash()
+{
+    if (g_AsyncLoggingEnabled.loadRelaxed() != 0) {
+        s_LoggerThread.waitForDone(1500);
+    }
+    if (s_SyncLoggerMutex.tryLock(200)) {
+        s_LoggerStream.flush();
+#ifdef LOG_TO_FILE
+        if (s_LoggerFile != nullptr && s_LoggerFile->isOpen()) {
+            s_LoggerFile->flush();
+        }
+#endif
+        s_SyncLoggerMutex.unlock();
+    }
+}
+
 LONG WINAPI UnhandledExceptionHandler(struct _EXCEPTION_POINTERS *ExceptionInfo)
 {
     // Only write a dump for the first unhandled exception
@@ -547,7 +566,8 @@ LONG WINAPI UnhandledExceptionHandler(struct _EXCEPTION_POINTERS *ExceptionInfo)
                                &info,
                                nullptr,
                                nullptr)) {
-            qCritical() << "Unhandled exception! Minidump written to:" << qDmpFileName;
+            // §LOGDROP-1127：log 會被匿名上傳，只寫檔名（目錄是固定的 log 目錄，帶著使用者名稱沒有幫助）。
+            qCritical() << "Unhandled exception! Minidump written to:" << QFileInfo(qDmpFileName).fileName();
         }
         else {
             qCritical() << "Unhandled exception! Failed to write dump:" << GetLastError();
@@ -556,8 +576,11 @@ LONG WINAPI UnhandledExceptionHandler(struct _EXCEPTION_POINTERS *ExceptionInfo)
         CloseHandle(dumpHandle);
     }
     else {
-        qCritical() << "Unhandled exception! Failed to open dump file:" << qDmpFileName << "with error" << GetLastError();
+        qCritical() << "Unhandled exception! Failed to open dump file:" << QFileInfo(qDmpFileName).fileName() << "with error" << GetLastError();
     }
+
+    // §LOGDROP-1127：上面那幾行還在非同步佇列裡；刷完才睡，下一次啟動的 crash 上傳才看得到 .dmp 檔名。
+    flushLogFileForCrash();
 
     // Sleep for a moment to allow the logging thread to finish up before crashing
     if (g_AsyncLoggingEnabled) {

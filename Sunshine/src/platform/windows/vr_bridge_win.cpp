@@ -3161,8 +3161,8 @@ namespace vr::bridge {
         status_.ring_corrupt = c.ring_corrupt;
       }
 
-      // timing 10 s 摘要（有 timing 記錄才印）
-      if (now - c.timing_window >= 10 * qpf()) {
+      // timing 30 s 摘要（有 timing 記錄才印；§LOGDROP-1127：10 秒 → 30 秒，欄位不變）
+      if (now - c.timing_window >= 30 * qpf()) {
         if (c.timing_total) {
           const auto &d = c.last_driver;
           const auto *k = c.timing_counts;
@@ -3225,7 +3225,7 @@ namespace vr::bridge {
               w.free_run
             );
           }
-          BOOST_LOG(info) << "[VIPLE-VR-DRV] timing 10s: recs=" << c.timing_total << " vsync=" << k[VRIPC_TE_VSYNC_VIRTUAL]
+          BOOST_LOG(info) << "[VIPLE-VR-DRV] timing 30s: recs=" << c.timing_total << " vsync=" << k[VRIPC_TE_VSYNC_VIRTUAL]
                           << " submit=" << k[VRIPC_TE_SUBMIT_LAYER] << " present=" << k[VRIPC_TE_PRESENT_EXIT]
                           << " postpresent=" << k[VRIPC_TE_POSTPRESENT_EXIT] << " compose=" << k[VRIPC_TE_COMPOSE_DONE]
                           << " pose=" << k[VRIPC_TE_POSE_UPDATED] << " stale=" << k[VRIPC_TE_STALE] << " snap=" << k[VRIPC_TE_PHASE_SNAP]

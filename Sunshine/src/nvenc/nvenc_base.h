@@ -5,6 +5,7 @@
 #pragma once
 
 // lib includes
+#include <chrono>
 #include <cstdint>
 #include <vector>
 #include <ffnvcodec/nvEncodeAPI.h>
@@ -272,12 +273,40 @@ namespace nvenc {
       std::pair<uint64_t, uint64_t> last_rfi_range;
       logging::min_max_avg_periodic_logger<double> frame_size_logger = {debug, "NvEnc: encoded frame sizes in kB", ""};
       // [VIPLE-NVENC-PROF] HEVC 1440p 60fps cap diagnosis: log encode_frame
-      // sub-step timings periodically.  `info` severity so visible without
-      // debug log level; 5-second interval keeps log volume manageable.
-      logging::min_max_avg_periodic_logger<double> encode_total_ms_logger  {info, "[VIPLE-NVENC] encode_frame total", "ms", std::chrono::seconds(5)};
-      logging::min_max_avg_periodic_logger<double> encode_async_ms_logger  {info, "[VIPLE-NVENC]   wait_async_evt",   "ms", std::chrono::seconds(5)};
-      logging::min_max_avg_periodic_logger<double> encode_lock_ms_logger   {info, "[VIPLE-NVENC]   lock_bitstream",   "ms", std::chrono::seconds(5)};
-      logging::min_max_avg_periodic_logger<double> encode_bsize_logger     {info, "[VIPLE-NVENC]   bitstream_size",   "B",  std::chrono::seconds(5)};
+      // sub-step timings periodically.  §LOGDROP-1127：原本是 4 行／5 秒（NVENC server 全部一起占
+      // 約 20% log 量），改成 30 秒 1 行、四項 min/max/avg 壓在同一行；欄位名稱不變。
+      // 只有 info 等級才累計（min_log_level > info 時完全不花成本）。
+      struct prof_stat_t {
+        double min_v = 1e18;
+        double max_v = -1e18;
+        double sum = 0;
+        uint32_t n = 0;
+
+        void add(double v) {
+          min_v = v < min_v ? v : min_v;
+          max_v = v > max_v ? v : max_v;
+          sum += v;
+          ++n;
+        }
+
+        double avg() const {
+          return n ? sum / n : 0.0;
+        }
+
+        void reset() {
+          min_v = 1e18;
+          max_v = -1e18;
+          sum = 0;
+          n = 0;
+        }
+      };
+
+      std::chrono::steady_clock::time_point prof_window_start = std::chrono::steady_clock::now();
+      prof_stat_t prof_total;
+      prof_stat_t prof_async;
+      prof_stat_t prof_lock;
+      prof_stat_t prof_bsize;
+      uint32_t prof_calls = 0;  // 這個視窗 encode_frame 被呼叫幾次（算 calls/sec）
     } encoder_state;
   };
 

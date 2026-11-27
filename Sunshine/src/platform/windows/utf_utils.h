@@ -20,4 +20,11 @@ namespace utf_utils {
    * @return The converted UTF-8 string.
    */
   std::string to_utf8(const std::wstring &string);
+
+  /**
+   * @brief Convert an ANSI (Windows code page, e.g. cp950) string into UTF-8.
+   * @param string The ANSI string.
+   * @return The converted UTF-8 string.
+   */
+  std::string from_acp(const std::string &string);
 }  // namespace utf_utils

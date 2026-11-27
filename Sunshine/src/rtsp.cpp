@@ -33,6 +33,7 @@ extern "C" {
 #include "rtsp.h"
 #include "stream.h"
 #include "sync.h"
+#include "utility.h"
 #include "video.h"
 #include "pyrowave_encode.h"
 #include "vr/vr_session.h"
@@ -143,12 +144,12 @@ namespace rtsp_stream {
         socket->sock.close(ec);
 
         if (ec) {
-          BOOST_LOG(error) << "RTSP: handle_read_encrypted_header(): Couldn't close tcp socket: "sv << ec.message();
+          BOOST_LOG(error) << "RTSP: handle_read_encrypted_header(): Couldn't close tcp socket: "sv << util::error_message_utf8(ec);
         }
       });
 
       if (ec || bytes < sizeof(encrypted_rtsp_header_t)) {
-        BOOST_LOG(error) << "RTSP: handle_read_encrypted_header(): Couldn't read from tcp socket: "sv << ec.message();
+        BOOST_LOG(error) << "RTSP: handle_read_encrypted_header(): Couldn't read from tcp socket: "sv << util::error_message_utf8(ec);
 
         respond(socket->sock, *socket->session, nullptr, 400, "BAD REQUEST", 0, {});
         return;
@@ -192,7 +193,7 @@ namespace rtsp_stream {
         socket->sock.close(ec);
 
         if (ec) {
-          BOOST_LOG(error) << "RTSP: handle_read_encrypted_message(): Couldn't close tcp socket: "sv << ec.message();
+          BOOST_LOG(error) << "RTSP: handle_read_encrypted_message(): Couldn't close tcp socket: "sv << util::error_message_utf8(ec);
         }
       });
 
@@ -201,7 +202,7 @@ namespace rtsp_stream {
       auto seq = util::endian::big<std::uint32_t>(header->sequenceNumber);
 
       if (ec || bytes < payload_length) {
-        BOOST_LOG(error) << "RTSP: handle_read_encrypted(): Couldn't read from tcp socket: "sv << ec.message();
+        BOOST_LOG(error) << "RTSP: handle_read_encrypted(): Couldn't read from tcp socket: "sv << util::error_message_utf8(ec);
 
         respond(socket->sock, *socket->session, nullptr, 400, "BAD REQUEST", 0, {});
         return;
@@ -283,12 +284,12 @@ namespace rtsp_stream {
         socket->sock.close(ec);
 
         if (ec) {
-          BOOST_LOG(error) << "RTSP: handle_plaintext_payload(): Couldn't close tcp socket: "sv << ec.message();
+          BOOST_LOG(error) << "RTSP: handle_plaintext_payload(): Couldn't close tcp socket: "sv << util::error_message_utf8(ec);
         }
       });
 
       if (ec) {
-        BOOST_LOG(error) << "RTSP: handle_plaintext_payload(): Couldn't read from tcp socket: "sv << ec.message();
+        BOOST_LOG(error) << "RTSP: handle_plaintext_payload(): Couldn't read from tcp socket: "sv << util::error_message_utf8(ec);
 
         return;
       }
@@ -350,13 +351,13 @@ namespace rtsp_stream {
       BOOST_LOG(debug) << "handle_read_plaintext(): Handle read of size: "sv << bytes << " bytes"sv;
 
       if (ec) {
-        BOOST_LOG(error) << "RTSP: handle_read_plaintext(): Couldn't read from tcp socket: "sv << ec.message();
+        BOOST_LOG(error) << "RTSP: handle_read_plaintext(): Couldn't read from tcp socket: "sv << util::error_message_utf8(ec);
 
         boost::system::error_code ec;
         socket->sock.close(ec);
 
         if (ec) {
-          BOOST_LOG(error) << "RTSP: handle_read_plaintext(): Couldn't close tcp socket: "sv << ec.message();
+          BOOST_LOG(error) << "RTSP: handle_read_plaintext(): Couldn't close tcp socket: "sv << util::error_message_utf8(ec);
         }
 
         return;
@@ -421,7 +422,7 @@ namespace rtsp_stream {
       auto bind_addr_str = net::get_bind_address(af);
       const auto bind_addr = boost::asio::ip::make_address(bind_addr_str, ec);
       if (ec) {
-        BOOST_LOG(error) << "Invalid bind address: "sv << bind_addr_str << " - " << ec.message();
+        BOOST_LOG(error) << "Invalid bind address: "sv << bind_addr_str << " - " << util::error_message_utf8(ec);
         return -1;
       }
 
@@ -466,7 +467,7 @@ namespace rtsp_stream {
 
     void handle_accept(const boost::system::error_code &ec) {
       if (ec) {
-        BOOST_LOG(error) << "Couldn't accept incoming connections: "sv << ec.message();
+        BOOST_LOG(error) << "Couldn't accept incoming connections: "sv << util::error_message_utf8(ec);
 
         // Stop server
         clear();
@@ -799,7 +800,7 @@ namespace rtsp_stream {
       bytes_send += sock.send(boost::asio::buffer(sv.substr(bytes_send)), 0, ec);
 
       if (ec) {
-        BOOST_LOG(error) << "RTSP: Couldn't send data over tcp socket: "sv << ec.message();
+        BOOST_LOG(error) << "RTSP: Couldn't send data over tcp socket: "sv << util::error_message_utf8(ec);
         return -1;
       }
     }
@@ -1426,7 +1427,7 @@ namespace rtsp_stream {
 
     boost::system::error_code ec;
     if (server.bind(net::af_from_enum_string(config::sunshine.address_family), net::map_port(rtsp_stream::RTSP_SETUP_PORT), ec)) {
-      BOOST_LOG(fatal) << "Couldn't bind RTSP server to port ["sv << net::map_port(rtsp_stream::RTSP_SETUP_PORT) << "], " << ec.message();
+      BOOST_LOG(fatal) << "Couldn't bind RTSP server to port ["sv << net::map_port(rtsp_stream::RTSP_SETUP_PORT) << "], " << util::error_message_utf8(ec);
       shutdown_event->raise(true);
 
       return;

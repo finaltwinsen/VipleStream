@@ -183,7 +183,9 @@ namespace vr::multilink {
     }
 
     /// 10 秒統計行（control 執行緒；回傳空字串＝還沒有連線）
-    std::string take_stats_line();
+    /// @param summary 不是 nullptr 時填「短摘要」（每條連線的 up/down、Mbps、deliv、rtt；約 30 字／條）。
+    ///        §LOGDROP-1127：預設只印摘要，完整行每 60 秒一次；完整行的欄位與順序不變。
+    std::string take_stats_line(std::string *summary = nullptr);
 
     /// §VR-LINK-GRACE：有沒有任何一條連線還活著（最近 2 s 內收過帶 CONFIRMED 的 PING）。任何執行緒
     bool any_alive() const;

@@ -60,6 +60,8 @@ public final class LogDrop {
     private static final long TRIGGER_GAP_MS = 10L * 60L * 1000L;
     private static final int DAILY_LIMIT = 8;
     private static final int LOGCAT_LIMIT = 4 * 1024 * 1024;
+    // §LOGDROP-1127：串流結束只送最後 512 KB（crash 與手動上傳維持 4 MB）。
+    private static final int SESSION_END_LOGCAT_LIMIT = 512 * 1024;
     private static final long LOGCAT_TIMEOUT_MS = 10_000L;
     private static final int NOTE_LIMIT = 2000;
     private static final String CRASH_FILE = "logdrop_crash";
@@ -226,7 +228,14 @@ public final class LogDrop {
             return failure("disabled");
         }
         try {
-            String body = combine(report, readOwnLogcat());
+            // §LOGDROP-1127：串流結束只留最後 512 KB；logcat 量最大，報告本文很小。
+            final boolean sessionEnd = "session-end".equals(trigger);
+            final String logcat = readOwnLogcat(sessionEnd ? SESSION_END_LOGCAT_LIMIT : LOGCAT_LIMIT);
+            String body = combine(report, logcat);
+            final String prefix = payloadHeader(report, logcat, trigger);
+            if (prefix.length() > 0) {
+                body = prefix + body;
+            }
             String redacted = LogRedactor.redact(body, computerNames(ctx));
             JSONObject json = new JSONObject();
             json.put("v", 1);
@@ -534,7 +543,105 @@ public final class LogDrop {
         String manufacturer = Build.MANUFACTURER == null ? "" : Build.MANUFACTURER;
         String model = Build.MODEL == null ? "" : Build.MODEL;
         String release = Build.VERSION.RELEASE == null ? "" : Build.VERSION.RELEASE;
-        return clip(manufacturer + " " + model + " / Android " + release, 200);
+        // §LOGDROP-1127：補 OS build（Build.ID）。這不是序號，也不能用來追到單一裝置。
+        String id = Build.ID == null ? "" : Build.ID;
+        String label = manufacturer + " " + model + " / Android " + release;
+        if (id.length() > 0) {
+            label += " (" + id + ")";
+        }
+        return clip(label, 200);
+    }
+
+    // §LOGDROP-1127：`# summary:` 與 `# exit:` 加在 payload 最前面，之後跟本文一起遮。
+    // session-end 的報告第一行已經是 `duration_ms=… resolution=… fps=… codec=…`，直接沿用；
+    // 其他內容拿不到就不寫（不為了摘要多掃一次報告）。
+    private static String payloadHeader(String report, String logcat, String trigger) {
+        StringBuilder out = new StringBuilder(320);
+        if ("session-end".equals(trigger) || "crash".equals(trigger)) {
+            StringBuilder summary = new StringBuilder(280);
+            if ("session-end".equals(trigger)) {
+                summary.append("sessions=1");
+            }
+            String first = firstNonEmptyLine(report);
+            if (first.length() > 0) {
+                if (summary.length() > 0) {
+                    summary.append(' ');
+                }
+                summary.append(first);
+            }
+            double avgFps = averageFps(logcat);
+            if (avgFps > 0.0) {
+                if (summary.length() > 0) {
+                    summary.append(' ');
+                }
+                summary.append("avgFps=").append(String.format(Locale.US, "%.1f", avgFps));
+            }
+            if (summary.length() > 0) {
+                out.append("# summary: ").append(clip(summary.toString(), 300)).append('\n');
+            }
+        }
+        if ("crash".equals(trigger)) {
+            // §LOGDROP-1127：crash 觸發代表上次寫了當機標記；標記檔只有崩潰處理常式會寫。
+            out.append("# exit: exception\n");
+        }
+        return out.toString();
+    }
+
+    private static String firstNonEmptyLine(String report) {
+        if (report == null) {
+            return "";
+        }
+        int start = 0;
+        while (start < report.length()) {
+            int end = report.indexOf('\n', start);
+            if (end < 0) {
+                end = report.length();
+            }
+            String line = report.substring(start, end).trim();
+            if (line.length() > 0) {
+                return clip(line.replace('\r', ' ').replace('\t', ' '), 280);
+            }
+            start = end + 1;
+        }
+        return "";
+    }
+
+    private static double averageFps(String logcat) {
+        if (logcat == null || logcat.length() == 0) {
+            return 0.0;
+        }
+        double sum = 0.0;
+        int count = 0;
+        int pos = 0;
+        while (pos < logcat.length()) {
+            int end = logcat.indexOf('\n', pos);
+            if (end < 0) {
+                end = logcat.length();
+            }
+            int marker = logcat.indexOf("[VIPLE-2D-PERF]", pos);
+            if (marker >= 0 && marker < end) {
+                int fpsAt = logcat.indexOf("fps=", marker);
+                if (fpsAt >= 0 && fpsAt < end) {
+                    int e = fpsAt + 4;
+                    while (e < end && (Character.isDigit(logcat.charAt(e)) || logcat.charAt(e) == '.')) {
+                        e++;
+                    }
+                    try {
+                        double value = Double.parseDouble(logcat.substring(fpsAt + 4, e));
+                        if (value > 0.0) {
+                            sum += value;
+                            count++;
+                        }
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+            if (end >= logcat.length()) {
+                break;
+            }
+            pos = end + 1;
+        }
+        return count > 0 ? sum / count : 0.0;
     }
 
     // §LOGDROP-HDR（2026-11-26）：logcat 是整個行程，檔頭數字只屬於剛結束的那一場。用裝置本地時間，才對得上 logcat 的時鐘。
@@ -568,22 +675,24 @@ public final class LogDrop {
         return Base64.encodeToString(raw.toByteArray(), Base64.NO_WRAP);
     }
 
-    private static String readOwnLogcat() {
+    private static String readOwnLogcat(int limit) {
         java.lang.Process process = null;
         try {
             process = Runtime.getRuntime().exec(new String[] {
                     "logcat", "-d", "-v", "threadtime", "--pid=" + android.os.Process.myPid()
             });
-            ByteTail tail = readTail(process.getInputStream(), process, LOGCAT_TIMEOUT_MS);
+            ByteTail tail = readTail(process.getInputStream(), process, LOGCAT_TIMEOUT_MS, limit);
             String text = new String(tail.toArray(), StandardCharsets.UTF_8);
             if (tail.truncated()) {
-                // §LOGDROP：切在 4 MB 邊界可能切到半個字或半行，從下一個換行才是完整的一行。
+                // §LOGDROP：切在擷取上限邊界可能切到半個字或半行，從下一個換行才是完整的一行。
                 int newline = text.indexOf('\n');
                 if (newline >= 0 && newline + 1 < text.length()) {
                     text = text.substring(newline + 1);
                 }
             }
-            return text;
+            // §LOGDROP-1127：上傳前先濾掉系統噪音（MIUIInput、VRI[、SurfaceView、OpenGLRenderer…），
+            // 單檔最大者 74% 都是這些行。
+            return filterLogcat(text);
         } catch (Exception error) {
             Log.w(TAG, LOG + "logcat failed " + error.getClass().getSimpleName());
             return "[VIPLE-LOGDROP] logcat unavailable\n";
@@ -594,9 +703,150 @@ public final class LogDrop {
         }
     }
 
+    // §LOGDROP-1127：只留看得懂事故的 tag。未知 tag 仍留 E/F（錯誤通常量少且關鍵），
+    // 續行（堆疊）跟著上一行決定去留。
+    private static boolean shouldKeepLogcatLine(String line, boolean previousKept) {
+        if (line.length() == 0) {
+            return false;
+        }
+        // threadtime：`MM-DD HH:MM:SS.mmm  PID  TID L TAG: 訊息`
+        int p = 0;
+        for (int field = 0; field < 4; field++) {
+            while (p < line.length() && line.charAt(p) == ' ') {
+                p++;
+            }
+            int start = p;
+            while (p < line.length() && line.charAt(p) != ' ') {
+                p++;
+            }
+            if (p == start) {
+                return previousKept;
+            }
+        }
+        while (p < line.length() && line.charAt(p) == ' ') {
+            p++;
+        }
+        if (p >= line.length()) {
+            return previousKept;
+        }
+        char level = line.charAt(p);
+        if ("VDIWEFA".indexOf(level) < 0) {
+            return previousKept;
+        }
+        p++;
+        if (p >= line.length() || line.charAt(p) != ' ') {
+            return previousKept;
+        }
+        while (p < line.length() && line.charAt(p) == ' ') {
+            p++;
+        }
+        int colon = line.indexOf(':', p);
+        if (colon < 0) {
+            return previousKept;
+        }
+        String tag = line.substring(p, colon);
+        if (tag.length() == 0 || tag.indexOf(' ') >= 0) {
+            return previousKept;
+        }
+        String message = line.substring(colon + 1);
+
+        if (isAppLogTag(tag) || isCrashLogLine(line)) {
+            return true;
+        }
+        if (level == 'E' || level == 'F' || level == 'A') {
+            return true;
+        }
+        if ("AndroidRuntime".equals(tag) || "DEBUG".equals(tag) || "libc".equals(tag)) {
+            return true;
+        }
+        // §LOGDROP-1127：MediaCodec 只留錯誤與統計行；設定類的每幀一行全丟。
+        if ("MediaCodec".equals(tag) || "CCodec".equals(tag) || "CCodecBufferChannel".equals(tag)) {
+            return level == 'W'
+                    || message.contains("Stats")
+                    || message.contains("Drop")
+                    || message.contains("dropped")
+                    || message.contains("Error");
+        }
+        if (tag.startsWith("Audio")) {
+            return true;
+        }
+        return isNetworkLogTag(tag);
+    }
+
+    private static boolean isAppLogTag(String tag) {
+        return tag.startsWith("VIPLE")
+                || tag.startsWith("Viple")
+                || tag.startsWith("viple")
+                || tag.startsWith("com.limelight")
+                || "FRUC".equals(tag)
+                || "VKBE".equals(tag)
+                || "FrucDump".equals(tag)
+                || "RelayClient".equals(tag)
+                || "RelayTunnel".equals(tag)
+                || "RelayTls".equals(tag)
+                || "LimeLog".equals(tag)
+                || "Moonlight".equals(tag)
+                // moonlight-core 的原生日誌（影像／音訊／控制通道）固定用這個 tag，且全是 INFO。
+                || "moonlight-common-c".equals(tag)
+                || "EvdevReader".equals(tag)
+                || "System.err".equals(tag)
+                || "System.out".equals(tag);
+    }
+
+    // §LOGDROP-1127：Wi-Fi 相關的系統 tag 量不大，但網路問題只能靠它判斷。
+    private static boolean isNetworkLogTag(String tag) {
+        return "wpa_supplicant".equals(tag)
+                || "WifiService".equals(tag)
+                || "WifiManager".equals(tag)
+                || "WifiHAL".equals(tag)
+                || "WifiVendorHal".equals(tag)
+                || "wifi_hal".equals(tag)
+                || "WifiStateMachine".equals(tag)
+                || "WifiClientModeImpl".equals(tag)
+                || "ConnectivityService".equals(tag)
+                || "NetworkStats".equals(tag)
+                || "DnsManager".equals(tag);
+    }
+
+    private static boolean isCrashLogLine(String line) {
+        return line.contains("FATAL EXCEPTION")
+                || line.contains("Fatal signal")
+                || line.contains("*** *** ***")
+                || line.contains("backtrace:")
+                || line.contains("Abort message")
+                || line.contains("ANR in ")
+                || line.contains("signal 11")
+                || line.contains("SIGSEGV")
+                || line.contains("tombstone");
+    }
+
+    private static String filterLogcat(String text) {
+        if (text == null || text.length() == 0) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(text.length() / 2 + 64);
+        int pos = 0;
+        boolean previousKept = false;
+        while (pos <= text.length()) {
+            int newline = text.indexOf('\n', pos);
+            int end = newline < 0 ? text.length() : newline;
+            String line = text.substring(pos, end);
+            boolean keep = shouldKeepLogcatLine(line, previousKept);
+            if (keep) {
+                out.append(line).append('\n');
+            }
+            previousKept = keep;
+            if (newline < 0) {
+                break;
+            }
+            pos = newline + 1;
+        }
+        return out.toString();
+    }
+
     // §LOGDROP：Android 上行程輸出的 available() 常常是 0，用它判斷會空等到逾時。
-    private static ByteTail readTail(final InputStream in, final java.lang.Process process, long timeoutMs) {
-        final ByteTail tail = new ByteTail(LOGCAT_LIMIT);
+    private static ByteTail readTail(final InputStream in, final java.lang.Process process, long timeoutMs, int limit) {
+        final ByteTail tail = new ByteTail(limit);
         final InputStream err = process.getErrorStream();
         Thread reader = new Thread(new Runnable() {
             @Override

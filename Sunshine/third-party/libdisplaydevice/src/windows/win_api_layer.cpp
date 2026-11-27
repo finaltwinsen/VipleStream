@@ -11,9 +11,12 @@
 #include <boost/uuid/name_generator_sha1.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_io.hpp>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
+#include <mutex>
+#include <string>
 
 // local includes
 #include "display_device/logging.h"
@@ -390,7 +393,37 @@ namespace display_device {
         error << error_code;
         break;
     }
-    error << ", message: " << std::system_category().message(static_cast<int>(error_code)) << "]";
+    // §LOGDROP-1127：std::system_category().message() 在 Windows 回的是 ANSI（例如 cp950），
+    // 直接寫進 UTF-8 日誌會變亂碼。改用 FormatMessageW 取得寬字元訊息，再轉成 UTF-8。
+    std::string system_message;
+    {
+      LPWSTR buffer {nullptr};
+      const DWORD length = FormatMessageW(
+        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_ALLOCATE_BUFFER,
+        nullptr,
+        static_cast<DWORD>(error_code),
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        reinterpret_cast<LPWSTR>(&buffer),
+        0,
+        nullptr
+      );
+      if (length > 0 && buffer) {
+        std::wstring message {buffer, length};
+        LocalFree(buffer);
+        while (!message.empty() && (message.back() == L'\r' || message.back() == L'\n' || message.back() == L' ')) {
+          message.pop_back();
+        }
+        const int utf8_len = WideCharToMultiByte(CP_UTF8, 0, message.data(), static_cast<int>(message.size()), nullptr, 0, nullptr, nullptr);
+        if (utf8_len > 0) {
+          system_message.resize(static_cast<std::size_t>(utf8_len));
+          WideCharToMultiByte(CP_UTF8, 0, message.data(), static_cast<int>(message.size()), system_message.data(), utf8_len, nullptr, nullptr);
+        }
+      }
+      if (system_message.empty()) {
+        system_message = "unknown error";
+      }
+    }
+    error << ", message: " << system_message << "]";
     return error.str();
   }
 
@@ -427,7 +460,21 @@ namespace display_device {
     } while (result == ERROR_INSUFFICIENT_BUFFER);
 
     if (result != ERROR_SUCCESS) {
-      DD_LOG(error) << getErrorString(result) << " failed to query display paths and modes!";
+      // §LOGDROP-1127：顯示狀態壞掉時 client 每 1～2 秒輪詢 /serverinfo，這裡會跟著洗版。
+      // 同一原因只印第一次與每 60 秒一行（含被壓掉的次數）；呼叫端另外有 1→5→30 秒的退避。
+      static std::mutex log_mtx;
+      static std::chrono::steady_clock::time_point last_log {};
+      static uint64_t suppressed = 0;
+      std::lock_guard lk {log_mtx};
+      const auto now = std::chrono::steady_clock::now();
+      if (last_log == std::chrono::steady_clock::time_point {} || now - last_log >= std::chrono::seconds(60)) {
+        DD_LOG(error) << getErrorString(result) << " failed to query display paths and modes!"
+                      << (suppressed ? " (suppressed " + std::to_string(suppressed) + " repeats)" : "");
+        last_log = now;
+        suppressed = 0;
+      } else {
+        ++suppressed;
+      }
       return std::nullopt;
     }
 

@@ -124,7 +124,12 @@ namespace confighttp {
    */
   void send_unauthorized(const resp_https_t &response, const req_https_t &request) {
     auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
-    BOOST_LOG(info) << "Web UI: ["sv << address << "] -- not authorized"sv;
+    // §LOGDROP-1127：本機（托盤／網頁介面自己輪詢）沒帶授權時降到 debug；其他來源仍留 info。
+    if (address == "127.0.0.1" || address == "::1") {
+      BOOST_LOG(debug) << "Web UI: ["sv << address << "] -- not authorized (loopback)"sv;
+    } else {
+      BOOST_LOG(info) << "Web UI: ["sv << address << "] -- not authorized"sv;
+    }
 
     constexpr auto code = SimpleWeb::StatusCode::client_error_unauthorized;
 
@@ -158,7 +163,12 @@ namespace confighttp {
    */
   void send_redirect(const resp_https_t &response, const req_https_t &request, const char *path) {
     auto address = net::addr_to_normalized_string(request->remote_endpoint().address());
-    BOOST_LOG(info) << "Web UI: ["sv << address << "] -- not authorized"sv;
+    // §LOGDROP-1127：同上，本機請求降到 debug。
+    if (address == "127.0.0.1" || address == "::1") {
+      BOOST_LOG(debug) << "Web UI: ["sv << address << "] -- not authorized (loopback)"sv;
+    } else {
+      BOOST_LOG(info) << "Web UI: ["sv << address << "] -- not authorized"sv;
+    }
     const SimpleWeb::CaseInsensitiveMultimap headers {
       {"Location", path},
       {"X-Frame-Options", "DENY"},

@@ -50,6 +50,10 @@ constexpr int kInstallIdLength = 8;
 constexpr qint64 kTriggerGapMs = 10LL * 60LL * 1000LL;
 constexpr int kDailyLimit = 8;
 constexpr qint64 kLogTailBytes = 4LL * 1024LL * 1024LL;
+// §LOGDROP-1127：串流結束只送最後 512 KB（crash 與手動上傳維持 4 MB）。
+constexpr qint64 kSessionEndTailBytes = 512LL * 1024LL;
+// §LOGDROP-1127：摘要要的解析度／編碼／要求幀率在開場，只多讀檔頭。
+constexpr qint64 kSummaryHeadBytes = 256LL * 1024LL;
 constexpr int kNoteLimit = 2000;
 
 std::atomic<LogDrop*> g_Instance {nullptr};
@@ -367,7 +371,7 @@ QString previousLogPath()
     return bestPath;
 }
 
-QString readTail(const QString& path, bool previous)
+QString readTail(const QString& path, bool previous, qint64 maxBytes)
 {
     if (path.isEmpty()) {
         return previous
@@ -382,15 +386,15 @@ QString readTail(const QString& path, bool previous)
     }
     const qint64 size = file.size();
     bool truncated = false;
-    if (size > kLogTailBytes) {
-        if (!file.seek(size - kLogTailBytes)) {
+    if (size > maxBytes) {
+        if (!file.seek(size - maxBytes)) {
             return QStringLiteral("[VIPLE-LOGDROP] log unavailable\n");
         }
         truncated = true;
     }
     const QByteArray bytes = file.readAll();
     QString text = QString::fromUtf8(bytes);
-    // §LOGDROP：切在 4 MB 邊界可能切到半個字或半行，從下一個換行才是完整的一行。
+    // §LOGDROP：切在擷取上限邊界可能切到半個字或半行，從下一個換行才是完整的一行。
     if (truncated) {
         const int newline = text.indexOf(QLatin1Char('\n'));
         if (newline >= 0 && newline + 1 < text.size()) {
@@ -398,6 +402,216 @@ QString readTail(const QString& path, bool previous)
         }
     }
     return text;
+}
+
+QString readHead(const QString& path, qint64 maxBytes)
+{
+    if (path.isEmpty()) {
+        return QString();
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return QString();
+    }
+    QString text = QString::fromUtf8(file.read(maxBytes));
+    const int newline = text.lastIndexOf(QLatin1Char('\n'));
+    if (newline >= 0 && newline + 1 < text.size()) {
+        text.truncate(newline + 1);
+    }
+    return text;
+}
+
+QString clippedToken(const QString& value, const QString& allowed, int max)
+{
+    QString out;
+    for (int i = 0; i < value.size() && out.size() < max; ++i) {
+        if (allowed.contains(value.at(i))) {
+            out.append(value.at(i));
+        }
+    }
+    return out;
+}
+
+// §LOGDROP-1127：`# summary:` 只用 log 裡固定格式的數字與代碼，不搬自由文字；欄位找不到就省略。
+// head 給開場的解析度／編碼／要求幀率，body 給最近的取樣；只有 body 的 fps 樣本會計入平均，
+// 兩段重疊時才不會把同一個樣本算兩次。
+static void scanSummary(const QString& text, bool countSamples,
+                        QString& res, QString& requestedFps, QString& codec, QString& audio, QString& loss,
+                        double& fpsSum, int& fpsCount)
+{
+    const QStringList lines = text.split(QLatin1Char('\n'));
+    for (const QString& line : lines) {
+        if (line.contains(QLatin1String("[VIPLE-SESSION]"))) {
+            const QString fpsMarker = QStringLiteral("fps=");
+            int p = line.indexOf(fpsMarker);
+            if (p >= 0) {
+                int e = p + fpsMarker.size();
+                while (e < line.size() && (line.at(e).isDigit() || line.at(e) == QLatin1Char('.'))) {
+                    ++e;
+                }
+                requestedFps = clippedToken(line.mid(p + fpsMarker.size(), e - p - fpsMarker.size()),
+                                            QStringLiteral("0123456789."), 8);
+            }
+            const QString codecMarker = QStringLiteral("codecs=0x");
+            p = line.indexOf(codecMarker);
+            if (p >= 0) {
+                int e = p + codecMarker.size();
+                while (e < line.size() && line.at(e).isLetterOrNumber()) {
+                    ++e;
+                }
+                bool ok = false;
+                const uint mask = line.mid(p + codecMarker.size(), e - p - codecMarker.size()).toUInt(&ok, 16);
+                if (ok) {
+                    // 遮罩定義與 MoonBridge.VIDEO_FORMAT_MASK_* 相同。
+                    if ((mask & 0x00F00000u) != 0) {
+                        codec = QStringLiteral("pyrowave");
+                    }
+                    else if ((mask & 0x000Fu) != 0) {
+                        codec = QStringLiteral("h264");
+                    }
+                    else if ((mask & 0x0F00u) != 0) {
+                        codec = QStringLiteral("h265");
+                    }
+                    else if ((mask & 0xF000u) != 0) {
+                        codec = QStringLiteral("av1");
+                    }
+                }
+            }
+        }
+        const QString resMarker = QStringLiteral("desktop resolution: ");
+        int p = line.indexOf(resMarker);
+        if (p >= 0) {
+            int e = p + resMarker.size();
+            int separators = 0;
+            while (e < line.size()) {
+                const QChar c = line.at(e);
+                if (c == QLatin1Char('x')) {
+                    if (separators >= 1) {
+                        break;
+                    }
+                    ++separators;
+                }
+                else if (!c.isDigit()) {
+                    break;
+                }
+                ++e;
+            }
+            res = clippedToken(line.mid(p + resMarker.size(), e - p - resMarker.size()),
+                               QStringLiteral("0123456789x"), 16);
+        }
+        if (countSamples && line.contains(QLatin1String("[VIPLE-2D-PERF]"))) {
+            const QString fpsMarker = QStringLiteral("fps=");
+            int q = line.indexOf(fpsMarker);
+            if (q >= 0) {
+                int e = q + fpsMarker.size();
+                while (e < line.size() && (line.at(e).isDigit() || line.at(e) == QLatin1Char('.'))) {
+                    ++e;
+                }
+                bool ok = false;
+                const double value = line.mid(q + fpsMarker.size(), e - q - fpsMarker.size()).toDouble(&ok);
+                if (ok && value > 0.0) {
+                    fpsSum += value;
+                    ++fpsCount;
+                }
+            }
+        }
+        const QString audioMarker = QStringLiteral("server audio status ");
+        p = line.indexOf(audioMarker);
+        if (p >= 0) {
+            p += audioMarker.size();
+            if (p < line.size()) {
+                const QChar status = line.at(p);
+                if (status == QLatin1Char('0') || status == QLatin1Char('2')) {
+                    audio = QStringLiteral("ok");
+                }
+                else if (status == QLatin1Char('1')) {
+                    audio = QStringLiteral("stalled");
+                }
+                else if (status == QLatin1Char('3')) {
+                    audio = QStringLiteral("none");
+                }
+            }
+        }
+        const QString lossMarker = QStringLiteral("loss=");
+        p = line.indexOf(lossMarker);
+        if (p >= 0) {
+            int e = p + lossMarker.size();
+            while (e < line.size() && (line.at(e).isDigit() || line.at(e) == QLatin1Char('.'))) {
+                ++e;
+            }
+            if (e > p + lossMarker.size() && e < line.size() && line.at(e) == QLatin1Char('%')) {
+                loss = clippedToken(line.mid(p + lossMarker.size(), e - p - lossMarker.size()),
+                                    QStringLiteral("0123456789."), 8)
+                        + QLatin1Char('%');
+            }
+        }
+    }
+}
+
+QString summarizeLog(const QString& head, const QString& body, bool sessionEnd)
+{
+    QString res;
+    QString requestedFps;
+    QString codec;
+    QString audio;
+    QString loss;
+    double fpsSum = 0.0;
+    int fpsCount = 0;
+    scanSummary(head, false, res, requestedFps, codec, audio, loss, fpsSum, fpsCount);
+    scanSummary(body, true, res, requestedFps, codec, audio, loss, fpsSum, fpsCount);
+
+    QStringList parts;
+    if (sessionEnd) {
+        // 串流結束一定有一場（client 端的 log 沒有 server 的 CLIENT CONNECTED 可以數）。
+        parts.append(QStringLiteral("sessions=1"));
+    }
+    if (!res.isEmpty()) {
+        QString value = QStringLiteral("res=") + res;
+        if (!requestedFps.isEmpty()) {
+            value += QLatin1Char('@') + requestedFps;
+        }
+        parts.append(value);
+    }
+    if (!codec.isEmpty()) {
+        parts.append(QStringLiteral("codec=") + codec);
+    }
+    if (fpsCount > 0) {
+        parts.append(QStringLiteral("avgFps=") + QString::number(fpsSum / fpsCount, 'f', 1));
+    }
+    if (!loss.isEmpty()) {
+        parts.append(QStringLiteral("loss=") + loss);
+    }
+    if (!audio.isEmpty()) {
+        parts.append(QStringLiteral("audio=") + audio);
+    }
+    return parts.join(QLatin1Char(' '));
+}
+
+// §LOGDROP-1127：當機處理常式把 `.dmp` 檔名寫進 log（只有檔名、沒有使用者路徑）。下次上傳從上一輪的
+// log 抓出來，不另外存狀態檔。
+QString crashDumpName(const QString& text)
+{
+    const QString marker = QStringLiteral("Minidump written to:");
+    const int p = text.lastIndexOf(marker);
+    if (p < 0) {
+        return QString();
+    }
+    const int begin = p + marker.size();
+    int end = text.indexOf(QLatin1Char('\n'), begin);
+    if (end < 0) {
+        end = text.size();
+    }
+    QString name = QFileInfo(text.mid(begin, end - begin).trimmed()).fileName();
+    if (name.size() < 5 || name.size() > 64 || !name.endsWith(QLatin1String(".dmp"))) {
+        return QString();
+    }
+    for (int i = 0; i < name.size(); ++i) {
+        const QChar c = name.at(i);
+        if (!c.isLetterOrNumber() && c != QLatin1Char('.') && c != QLatin1Char('_') && c != QLatin1Char('-')) {
+            return QString();
+        }
+    }
+    return name;
 }
 
 QStringList savedComputerNames()
@@ -479,8 +693,24 @@ public:
         // §LOGDROP：先把已入列的行寫進檔，再讀。crash 要的是上一個行程的檔，不是這次的。
         vipleFlushLogFile();
         const QString path = m_Previous ? previousLogPath() : vipleCurrentLogFilePath();
-        const QString text = readTail(path, m_Previous);
-        const QString redacted = LogRedactor::redact(text, m_Secrets);
+        // §LOGDROP-1127：串流結束只送最後 512 KB；crash 與手動上傳維持原本的 4 MB。
+        const qint64 tailBytes = m_Trigger == QLatin1String("session-end") ? kSessionEndTailBytes : kLogTailBytes;
+        const QString text = readTail(path, m_Previous, tailBytes);
+        QString prefix;
+        const QString summary = summarizeLog(readHead(path, kSummaryHeadBytes), text,
+                                             m_Trigger == QLatin1String("session-end"));
+        if (!summary.isEmpty()) {
+            prefix += QStringLiteral("# summary: ") + summary + QLatin1Char('\n');
+        }
+        if (m_Trigger == QLatin1String("crash")) {
+            // §LOGDROP-1127：crash 觸發只代表「上次沒正常結束」。上一輪 log 有 Minidump 行才是例外，
+            // 否則寫 unclean-exit，才不會把停服務誤標成當掉。
+            const QString dump = crashDumpName(text);
+            prefix += dump.isEmpty()
+                    ? QStringLiteral("# exit: unclean-exit\n")
+                    : QStringLiteral("# exit: exception dump=") + dump + QLatin1Char('\n');
+        }
+        const QString redacted = LogRedactor::redact(prefix + text, m_Secrets);
         const QByteArray utf8 = redacted.toUtf8();
         bool gzipOk = false;
         const QByteArray gzip = gzipEncode(utf8, &gzipOk);
@@ -659,9 +889,13 @@ void LogDrop::startWorker(const QString& trigger, const QString& note, int delay
 {
     const QString source = platformSource();
     const QString version = clipText(QString::fromLatin1(VERSION_STR), 64);
-    const QString device = clipText(
-            QSysInfo::prettyProductName() + QStringLiteral(" / ") + QSysInfo::currentCpuArchitecture(),
-            200);
+    // §LOGDROP-1127：補上 OS build（Windows 是 10.0.x、Linux 是核心版號）。GPU 與驅動在 client 端拿不到，省略。
+    QString device = QSysInfo::prettyProductName() + QStringLiteral(" / ") + QSysInfo::currentCpuArchitecture();
+    const QString kernel = QSysInfo::kernelVersion();
+    if (!kernel.isEmpty()) {
+        device += QStringLiteral(" / kernel ") + kernel;
+    }
+    device = clipText(device, 200);
     QString install;
     QStringList secrets;
     {

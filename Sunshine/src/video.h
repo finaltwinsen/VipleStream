@@ -438,6 +438,18 @@ namespace video {
   int probe_encoders(int capture_source = 0, const vr_probe_shape_t *shape = nullptr, bool vr_cache = true);
 
   /**
+   * @brief §LOGDROP-1127：上一次 probe_encoders() 失敗的原因。
+   *        /launch 的 503 要能分辨「沒有顯示器」與「沒有可用的 encoder」；舊 client 只看錯誤碼（維持 503）。
+   */
+  enum class probe_failure_e {
+    none,  ///< 上次探測成功（或還沒探測過）
+    display,  ///< 目前沒有任何 active 顯示器，探測被擋下
+    encoder,  ///< 有顯示器，但找不到可用的 encoder
+  };
+
+  probe_failure_e last_probe_failure();
+
+  /**
    * @brief M1b S1-09（§C.6 第 6 點）：把桌面探測的全域狀態（chosen_encoder、active_*_mode、
    *        last_encoder_probe_supported_*、每個 encoder 的 h264／hevc／av1 bitset、快取的來源）存起來。
    *        VR 探測會覆寫這些值；呼叫端以 vr_probe_scope 保證任何出口都還原。重複呼叫只保留第一份（巢狀安全）。

@@ -50,8 +50,7 @@ namespace utf_utils {
     return output;
   }
 
-  std::string to_utf8(const std::wstring &string) {
-    // No conversion needed if the string is empty
+  std::string to_utf8(const std::wstring &string) {    // No conversion needed if the string is empty
     if (string.empty()) {
       return {};
     }
@@ -85,5 +84,34 @@ namespace utf_utils {
     }
 
     return output;
+  }
+
+  std::string from_acp(const std::string &string) {
+    // §LOGDROP-1127：Windows 系統錯誤字串（FormatMessageA／boost system_category）是 ANSI（例如 cp950），
+    // 直接寫進 UTF-8 日誌會變亂碼；先轉成寬字元再交給 to_utf8。
+    if (string.empty()) {
+      return {};
+    }
+
+    if (string.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      return {};
+    }
+
+    const auto input_len = static_cast<int>(string.size());
+    auto output_size = MultiByteToWideChar(CP_ACP, 0, string.data(), input_len, nullptr, 0);
+    if (output_size <= 0) {
+      return string;  // 轉不了就原樣回傳，至少不要讓呼叫端拿到空字串
+    }
+
+    std::wstring output(static_cast<std::size_t>(output_size), L'\0');
+    output_size = MultiByteToWideChar(CP_ACP, 0, string.data(), input_len, output.data(), static_cast<int>(output.size()));
+    if (output_size <= 0) {
+      return string;
+    }
+    if (static_cast<std::size_t>(output_size) < output.size()) {
+      output.resize(static_cast<std::size_t>(output_size));
+    }
+
+    return to_utf8(output);
   }
 }  // namespace utf_utils

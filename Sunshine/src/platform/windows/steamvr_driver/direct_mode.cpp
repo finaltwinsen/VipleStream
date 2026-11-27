@@ -998,24 +998,57 @@ namespace vrdrv {
     }
     layer_count_ = 0;
 
-    // 10 秒統計
+    // 30 秒統計（§LOGDROP-1127：10 秒 → 30 秒；欄位不變）
     if (stat_t0_ == 0) {
       stat_t0_ = present_qpc;
-    } else if (present_qpc - stat_t0_ >= 10 * ctx_.qpf) {
-      VRDRV_LOG_INFO("timing 10s: presents=%llu composed=%llu noslot=%llu acqTimeout=%llu acqSlow=%llu noTarget=%llu missed=%llu intervalMaxMs=%.2f layersMax=%u swapsets=%u keyedMutex=%s syncOk=%llu releaseFailed=%llu",
+    } else if (present_qpc - stat_t0_ >= 30 * ctx_.qpf) {
+      VRDRV_LOG_INFO("timing 30s: presents=%llu composed=%llu noslot=%llu acqTimeout=%llu acqSlow=%llu noTarget=%llu missed=%llu intervalMaxMs=%.2f layersMax=%u swapsets=%u keyedMutex=%s syncOk=%llu releaseFailed=%llu",
                      (unsigned long long) stat_presents_, (unsigned long long) stat_composed_, (unsigned long long) stat_noslot_, (unsigned long long) stat_acq_timeout_, (unsigned long long) stat_acq_slow_,
                      (unsigned long long) stat_no_target_, (unsigned long long) stat_missed_, stat_interval_max_ms_, st.max_layer_count.load(),
                      (unsigned) sets_.size(), sync_mutex_ ? "yes" : (sync_handle_ ? "absent" : "none"), (unsigned long long) sync_ok_, (unsigned long long) sync_release_failed_);
       if (stat_have_l0_) {
         const auto &L = stat_last_l0_;
+        // §LOGDROP-1127：第 0 層的 4 行（2 眼 × src/proj）原本每 10 秒固定印；改成只在來源
+        // （pid／尺寸／格式）或姿態變化 > 5 mm 時印，靜態場次不再洗版。
+        bool log_l0[2] = {false, false};
+        const float pose_p[3] = {L.pose[0][3], L.pose[1][3], L.pose[2][3]};
+        for (int e = 0; e < 2; ++e) {
+          uint32_t idx = 0;
+          const swapset_t *src = find_locked(L.tex[e], idx);
+          bool changed = !l0_log_valid_[e] ||
+                         l0_log_pid_[e] != (src ? src->pid : 0) ||
+                         l0_log_w_[e] != (src ? src->width : 0) ||
+                         l0_log_h_[e] != (src ? src->height : 0) ||
+                         l0_log_fmt_[e] != (src ? (uint32_t) src->format : 0) ||
+                         std::fabs(pose_p[0] - l0_log_pose_[e][0]) > 0.005f ||
+                         std::fabs(pose_p[1] - l0_log_pose_[e][1]) > 0.005f ||
+                         std::fabs(pose_p[2] - l0_log_pose_[e][2]) > 0.005f;
+          if (changed) {
+            log_l0[e] = true;
+            l0_log_valid_[e] = true;
+            l0_log_pid_[e] = src ? src->pid : 0;
+            l0_log_w_[e] = src ? src->width : 0;
+            l0_log_h_[e] = src ? src->height : 0;
+            l0_log_fmt_[e] = src ? (uint32_t) src->format : 0;
+            l0_log_pose_[e][0] = pose_p[0];
+            l0_log_pose_[e][1] = pose_p[1];
+            l0_log_pose_[e][2] = pose_p[2];
+          }
+        }
         // 第 0 層的貼圖來源（哪個行程的 swap set、尺寸）：分辨是 app 的貼圖還是 vrcompositor 自己重畫的
         for (int e = 0; e < 2; ++e) {
+          if (!log_l0[e]) {
+            continue;
+          }
           uint32_t idx = 0;
           const swapset_t *src = find_locked(L.tex[e], idx);
           VRDRV_LOG_INFO("layer0 eye=%d src pid=%u size=%ux%u fmt=%u idx=%u pose=%.4f,%.4f,%.4f", e, src ? src->pid : 0, src ? src->width : 0, src ? src->height : 0, src ? (unsigned) src->format : 0, idx,
                          L.pose[0][3], L.pose[1][3], L.pose[2][3]);
         }
         for (int e = 0; e < 2; ++e) {
+          if (!log_l0[e]) {
+            continue;
+          }
           VRDRV_LOG_INFO("layer0 eye=%d proj m00=%.4f m02=%.4f m11=%.4f m12=%.4f m20=%.4f m21=%.4f m32=%.4f bounds=%.3f,%.3f,%.3f,%.3f eyeRect=%.3f,%.3f,%.3f,%.3f", e, L.proj[e][0][0],
                          L.proj[e][0][2], L.proj[e][1][1], L.proj[e][1][2], L.proj[e][2][0], L.proj[e][2][1], L.proj[e][3][2], L.bounds[e][0], L.bounds[e][1], L.bounds[e][2], L.bounds[e][3],
                          eye_rect_[e].left, eye_rect_[e].right, eye_rect_[e].top, eye_rect_[e].bottom);

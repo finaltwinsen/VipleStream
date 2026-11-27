@@ -495,9 +495,10 @@ namespace vrdrv {
       if (!ok) {
         break;
       }
-      if (now - t0 >= 10 * f) {
+      if (now - t0 >= 30 * f) {
         // 前段欄位順序不變（docs/log_tags.md）；2026-10-05 起尾端加 offset 分布、到達間隔、hold 與 pose_flags；2026-10-31 加 blendRecoveries
-        VRDRV_LOG_INFO("tracking 10s: new=%llu staleSends=%llu stale=%llu oor=%llu invalid=%llu torn=%llu offsetUs min=%lld max=%lld"
+        // §LOGDROP-1127：10 秒 → 30 秒（欄位不變）
+        VRDRV_LOG_INFO("tracking 30s: new=%llu staleSends=%llu stale=%llu oor=%llu invalid=%llu torn=%llu offsetUs min=%lld max=%lld"
                        " p50=%d ctrlOffUs p50=%d p95=%d arrivalMaxMs=%.1f gt2T=%llu hold=%llu holdExpired=%llu poseFlags=0x%x blendRecoveries=%llu",
                        (unsigned long long) n_new, (unsigned long long) n_stale_sends, (unsigned long long) n_stale, (unsigned long long) n_oor,
                        (unsigned long long) n_invalid, (unsigned long long) n_torn, (long long) (n_new ? offset_min_us : 0), (long long) (n_new ? offset_max_us : 0),
@@ -505,7 +506,7 @@ namespace vrdrv {
                        (unsigned long long) n_arrival_gt2t, (unsigned long long) n_hold, (unsigned long long) n_hold_expired, cfg.pose_flags,
                        (unsigned long long) n_blend_recoveries);
         // 另外一行：上面那一行已經接近 driver log 單行的長度上限，接在後面的欄位會被截掉（2.0.186 實測 ctrlBackUs 印不出來）
-        VRDRV_LOG_INFO("tracking 10s ctrl: predUs=%d ctrlKeepMs=%d ctrlBackUs=%d ctrlKeepNowUs=%d predict=%d accMax=%.0f",
+        VRDRV_LOG_INFO("tracking 30s ctrl: predUs=%d ctrlKeepMs=%d ctrlBackUs=%d ctrlKeepNowUs=%d predict=%d accMax=%.0f",
                        (int) ctx_.pred_us_recent.load(std::memory_order_relaxed), cfg.ctrl_keep_ms_p1 != 0 ? (int) cfg.ctrl_keep_ms_p1 - 1 : -1,
                        (int) (ctrl_back_last_s * 1e6), ctrl_keep_last_s < 0.0 ? -1 : (int) (ctrl_keep_last_s * 1e6),
                        (cfg.pose_flags & VRIPC_POSE_F_CTRL_PREDICT) != 0 ? 1 : 0, ctrl_acc_max);

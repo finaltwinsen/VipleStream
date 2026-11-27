@@ -977,6 +977,12 @@ namespace stream {
       uint32_t heldDropped = 0;
       uint32_t downHaptics = 0;
       uint32_t downDropped = 0;
+      // §LOGDROP-1127：時鐘偏移過大（> 1 s）的 WARN 節流（每 60 秒最多一行）
+      std::chrono::steady_clock::time_point lastClkOffsetWarn {};
+      // §LOGDROP-1127：VR-LINK 完整統計每 60 秒一次（其餘 10 秒只印短摘要）
+      std::chrono::steady_clock::time_point lastLinkFullLog {};
+      // §LOGDROP-1127：POSE-RX／UPLINK／CLK／TIMING 降到 30 秒一次
+      std::chrono::steady_clock::time_point lastSlowStatsLog {};
     } vrCtrl;
 
     // 只在 videoBroadcastThread 存取：[VIPLE-VR-TX] 每個 session 印一次
@@ -996,6 +1002,7 @@ namespace stream {
     bool flatLinkAddrsSent = false;
     std::chrono::steady_clock::time_point flatAddrsAt {};
     std::chrono::steady_clock::time_point flatStatsAt {};
+    std::chrono::steady_clock::time_point flatLinkFullLogAt {};  // §LOGDROP-1127：完整 VR-LINK 統計每 60 秒一次
 
     // §VR-MULTILINK：/launch 協商了多連線的 VR session 才有值（alloc 建立，join 時 stop）。
     // 有連線可用時影像與音訊改由它在每條連線各送一份，原本的單一路徑暫停；nullptr 時行為完全不變。
@@ -2779,13 +2786,15 @@ namespace stream {
     }
     const auto cs = session->vr ? session->vr->clock_stats(false) : std::nullopt;
     const bool clk_unlocked = !cs.has_value() || !cs->ready;
+    // §LOGDROP-1127：時鐘偏移 |offset| > 1 s（例：兩端時鐘差好幾天）時 oneway 沒有意義，印 n/a。
+    const bool clk_offset_unusable = clk_unlocked || cs->offset_ns > 1'000'000'000LL || cs->offset_ns < -1'000'000'000LL;
 
     BOOST_LOG(info) << "[VIPLE-VR-LAT10] " << (is_final ? "(final) " : "") << "frames=" << v.latMatchedFrames
                     << " | present->enc " << vr_format_lat_stats(v.latPresentToEnc, false, clk_unlocked)
                     << " | enc " << vr_format_lat_stats(v.latEnc, false, clk_unlocked)
                     << " | enc->send " << vr_format_lat_stats(v.latEncToSend, false, clk_unlocked)
                     << " | send " << vr_format_lat_stats(v.latSend, false, clk_unlocked)
-                    << " | oneway " << vr_format_lat_stats(v.latOneway, true, clk_unlocked)
+                    << " | oneway " << (clk_offset_unusable ? std::string {"n/a"} : vr_format_lat_stats(v.latOneway, true, clk_unlocked))
                     << " | host " << vr_format_lat_stats(v.latHost, false, clk_unlocked)
                     << " | to-client " << vr_format_lat_stats(v.latToClient, true, clk_unlocked)
                     << " | KB " << vr_format_lat_stats(v.latKB, false, clk_unlocked)
@@ -3259,8 +3268,16 @@ namespace stream {
       }
       if (now - session->flatStatsAt >= 10s) {
         session->flatStatsAt = now;
-        if (const auto line = session->vrLinks->take_stats_line(); !line.empty()) {
-          BOOST_LOG(info) << "[VIPLE-VR-LINK] 10s: " << line;
+        // §LOGDROP-1127：每 10 秒只印短摘要；完整行每 60 秒一次（或 debug 等級）。
+        std::string summary;
+        if (const auto line = session->vrLinks->take_stats_line(&summary); !line.empty()) {
+          const bool full = now - session->flatLinkFullLogAt >= 60s || config::sunshine.min_log_level <= 1;
+          if (full) {
+            BOOST_LOG(info) << "[VIPLE-VR-LINK] 10s full: " << line;
+            session->flatLinkFullLogAt = now;
+          } else {
+            BOOST_LOG(info) << "[VIPLE-VR-LINK] 10s: " << summary;
+          }
         }
         // §FLAT-REPAIR：補包的 10 秒彙總（這 10 秒沒有任何回報時是空字串，不印）
         if (const auto line = session->vrLinks->take_repair_line(); !line.empty()) {
@@ -3390,33 +3407,48 @@ namespace stream {
       const auto &prev = ctl.lastLogStats;
       const double secs = std::chrono::duration<double>(now - ctl.lastLog).count();
       const auto rx = cur.pose_rx - prev.pose_rx;
-      BOOST_LOG(info) << "[VIPLE-VR-POSE-RX] 10s: rx=" << rx
-                      << " (" << std::format("{:.1f}", secs > 0 ? rx / secs : 0.0) << "/s)"
-                      << " ooo=" << cur.pose_ooo - prev.pose_ooo
-                      << " gap=" << cur.pose_gap - prev.pose_gap
-                      << " viaQuic=" << cur.pose_via_quic - prev.pose_via_quic
-                      << " bad=" << cur.pose_bad - prev.pose_bad
-                      << " lastId=" << cur.last_sample_id
-                      << " | frames tagged=" << cur.frames_tagged - prev.frames_tagged
-                      << " fallback=" << cur.frames_fallback - prev.frames_fallback
-                      << " | c2s loss=" << cur.loss_rx - prev.loss_rx
-                      << " waves=" << cur.refresh_waves - prev.refresh_waves
-                      << " latch=" << cur.latch_rx - prev.latch_rx
-                      << " timing=" << cur.timing_rx - prev.timing_rx
-                      << " other=" << cur.other_c2s - prev.other_c2s;
+      // §LOGDROP-1127：POSE-RX／UPLINK／CLK／TIMING 這四行降到 30 秒一次（視窗仍是 10 秒，欄位不變）。
+      const bool slow_stats = now - ctl.lastSlowStatsLog >= 30s;
+      if (slow_stats) {
+        ctl.lastSlowStatsLog = now;
+        BOOST_LOG(info) << "[VIPLE-VR-POSE-RX] 10s: rx=" << rx
+                        << " (" << std::format("{:.1f}", secs > 0 ? rx / secs : 0.0) << "/s)"
+                        << " ooo=" << cur.pose_ooo - prev.pose_ooo
+                        << " gap=" << cur.pose_gap - prev.pose_gap
+                        << " viaQuic=" << cur.pose_via_quic - prev.pose_via_quic
+                        << " bad=" << cur.pose_bad - prev.pose_bad
+                        << " lastId=" << cur.last_sample_id
+                        << " | frames tagged=" << cur.frames_tagged - prev.frames_tagged
+                        << " fallback=" << cur.frames_fallback - prev.frames_fallback
+                        << " | c2s loss=" << cur.loss_rx - prev.loss_rx
+                        << " waves=" << cur.refresh_waves - prev.refresh_waves
+                        << " latch=" << cur.latch_rx - prev.latch_rx
+                        << " timing=" << cur.timing_rx - prev.timing_rx
+                        << " other=" << cur.other_c2s - prev.other_c2s;
+      }
       // 2026-10-05：上行空窗（server 收到的時刻）與控制執行緒單輪耗時。tracking 樣本與其他 control 訊息共用這條
       // 執行緒、一輪只處理一個 ENet 事件，本體或某個 callback 卡住，樣本就會成串晚到（driver 端看到 > 2T 的空窗）
       {
         const auto arr = vr_state.take_arrival_stats();
         const auto loop = take_ctrl_loop_stats();
-        BOOST_LOG(info) << "[VIPLE-VR-UPLINK] 10s: arrivalMaxMs=" << std::format("{:.1f}", arr.max_us / 1000.0) << " gt2T=" << arr.gt2t
-                        << " | ctrl loop bodyMaxUs=" << loop.body_max_us << " cbMaxUs=" << loop.cb_max_us
-                        << " cbMaxType=0x" << std::format("{:04x}", loop.cb_max_type) << " slowCb=" << loop.slow_cb << " events=" << loop.events;
+        if (slow_stats) {
+          BOOST_LOG(info) << "[VIPLE-VR-UPLINK] 10s: arrivalMaxMs=" << std::format("{:.1f}", arr.max_us / 1000.0) << " gt2T=" << arr.gt2t
+                          << " | ctrl loop bodyMaxUs=" << loop.body_max_us << " cbMaxUs=" << loop.cb_max_us
+                          << " cbMaxType=0x" << std::format("{:04x}", loop.cb_max_type) << " slowCb=" << loop.slow_cb << " events=" << loop.events;
+        }
       }
       // §VR-MULTILINK：每條連線的 10 秒統計（還沒有連線時不印）
       if (session->vrLinks) {
-        if (const auto line = session->vrLinks->take_stats_line(); !line.empty()) {
-          BOOST_LOG(info) << "[VIPLE-VR-LINK] 10s: " << line;
+        // §LOGDROP-1127：每 10 秒只印短摘要；完整行每 60 秒一次（或 debug 等級）。ABR 解析仍用完整行。
+        std::string link_summary;
+        if (const auto line = session->vrLinks->take_stats_line(&link_summary); !line.empty()) {
+          const bool full = now - ctl.lastLinkFullLog >= 60s || config::sunshine.min_log_level <= 1;
+          if (full) {
+            BOOST_LOG(info) << "[VIPLE-VR-LINK] 10s full: " << line;
+            ctl.lastLinkFullLog = now;
+          } else {
+            BOOST_LOG(info) << "[VIPLE-VR-LINK] 10s: " << link_summary;
+          }
           // §VR-PACE-AB（2026-11-13，對照測試用；vr_pace_ab_s，預設 0＝不切換）：同一場內每 N 秒在「照 vr_pace_spread_pct 攤開」
           // 與「一次送完」之間輪流。外出經 VPN 的線路幾分鐘內就會變（同一晚有一場碰上幾十秒的塌陷），分場對照比不出差別；
           // 同一場內輪流才比得出來。切換點緊接在這一行 10 秒統計之後，host 的每個 10 秒視窗都只屬於一種狀態；
@@ -3509,7 +3541,16 @@ namespace stream {
       }
       // §M1b S1-12：時鐘對映 10 秒行（欄位順序見 clk::format_stats，F.10 分析腳本依賴）
       if (const auto cs = vr_state.clock_stats(true)) {
-        BOOST_LOG(info) << "[VIPLE-VR-CLK] 10s: " << ::vr::clk::format_stats(*cs);
+        // §LOGDROP-1127：偏移超過 1 秒時，oneway／to-client 的絕對值不可用；這裡每 60 秒加一行 WARN
+        if ((cs->offset_ns > 1'000'000'000LL || cs->offset_ns < -1'000'000'000LL) &&
+            (ctl.lastClkOffsetWarn == std::chrono::steady_clock::time_point {} || now - ctl.lastClkOffsetWarn >= 60s)) {
+          ctl.lastClkOffsetWarn = now;
+          BOOST_LOG(warning) << "[VIPLE-VR-CLK] WARN offset=" << cs->offset_ns / 1000
+                             << "us exceeds 1 s - oneway/to-client are not usable for this session";
+        }
+        if (slow_stats) {
+          BOOST_LOG(info) << "[VIPLE-VR-CLK] 10s: " << ::vr::clk::format_stats(*cs);
+        }
       }
       // M4a R3：LATCH 頻率鎖與 client 時序
       if (cur.latch_rx != prev.latch_rx) {
@@ -3561,13 +3602,15 @@ namespace stream {
         ctl.lastBufLag0 = t->bufLag0Total;
         ctl.lastPresented = t->framesPresented;
         ctl.havePresented = true;
-        BOOST_LOG(info) << "[VIPLE-VR-TIMING] 10s: presented=" << t->framesPresented << " xrMissed=" << t->xrMissed
-                        << " metaMiss=" << t->metaMiss << " period=" << std::format("{:.2f}", t->displayPeriodNs / 1e6) << "ms"
-                        << " decode p50/p95=" << t->decodeP50Us << '/' << t->decodeP95Us << "us"
-                        << " render p50/p95=" << t->renderP50Us << '/' << t->renderP95Us << "us"
-                        << " slack p50/p05=" << t->slackP50Us << '/' << t->slackP05Us << "us"
-                        << " mtp p50/p95=" << std::format("{:.1f}", t->mtpP50_100us / 10.0) << '/' << std::format("{:.1f}", t->mtpP95_100us / 10.0) << "ms"
-                        << new_per_10s << buf_10s;
+        if (slow_stats) {
+          BOOST_LOG(info) << "[VIPLE-VR-TIMING] 10s: presented=" << t->framesPresented << " xrMissed=" << t->xrMissed
+                          << " metaMiss=" << t->metaMiss << " period=" << std::format("{:.2f}", t->displayPeriodNs / 1e6) << "ms"
+                          << " decode p50/p95=" << t->decodeP50Us << '/' << t->decodeP95Us << "us"
+                          << " render p50/p95=" << t->renderP50Us << '/' << t->renderP95Us << "us"
+                          << " slack p50/p05=" << t->slackP50Us << '/' << t->slackP05Us << "us"
+                          << " mtp p50/p95=" << std::format("{:.1f}", t->mtpP50_100us / 10.0) << '/' << std::format("{:.1f}", t->mtpP95_100us / 10.0) << "ms"
+                          << new_per_10s << buf_10s;
+        }
       }
       if (session->video.vrAbrFast) {
         std::lock_guard<std::mutex> lk(session->video.abrMutex);
@@ -5710,7 +5753,7 @@ namespace stream {
         }
 
         if (ec || !bytes) {
-          BOOST_LOG(error) << "Couldn't receive data from udp socket: "sv << ec.message();
+          BOOST_LOG(error) << "Couldn't receive data from udp socket: "sv << util::error_message_utf8(ec);
           return;
         }
 
@@ -6244,7 +6287,8 @@ namespace stream {
         s_BcastBucketCount++;
         s_BcastBucketBytes += packet->data_size();
         auto bucketMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(_bcastNow - s_BcastBucketStart).count();
-        if (bucketMs >= 5000.0) {
+        // §LOGDROP-1127：5 秒 → 30 秒（統計欄位不變；和 NVENC 統計一起降頻）
+        if (bucketMs >= 30000.0) {
           double rate = s_BcastBucketCount * 1000.0 / bucketMs;
           double mbps = (s_BcastBucketBytes * 8.0 / 1e6) / (bucketMs / 1000.0);
           BOOST_LOG(info) << "[VIPLE-BCAST-RATE] popped " << s_BcastBucketCount
@@ -7231,7 +7275,7 @@ namespace stream {
     boost::system::error_code ec;
     ctx.video_sock.open(protocol, ec);
     if (ec) {
-      BOOST_LOG(fatal) << "Couldn't open socket for Video server: "sv << ec.message();
+      BOOST_LOG(fatal) << "Couldn't open socket for Video server: "sv << util::error_message_utf8(ec);
 
       return -1;
     }
@@ -7246,27 +7290,27 @@ namespace stream {
     auto bind_addr_str = net::get_bind_address(address_family);
     const auto bind_addr = boost::asio::ip::make_address(bind_addr_str, ec);
     if (ec) {
-      BOOST_LOG(fatal) << "Invalid bind address: "sv << bind_addr_str << " - " << ec.message();
+      BOOST_LOG(fatal) << "Invalid bind address: "sv << bind_addr_str << " - " << util::error_message_utf8(ec);
       return -1;
     }
 
     ctx.video_sock.bind(udp::endpoint(bind_addr, video_port), ec);
     if (ec) {
-      BOOST_LOG(fatal) << "Couldn't bind Video server to port ["sv << video_port << "]: "sv << ec.message();
+      BOOST_LOG(fatal) << "Couldn't bind Video server to port ["sv << video_port << "]: "sv << util::error_message_utf8(ec);
 
       return -1;
     }
 
     ctx.audio_sock.open(protocol, ec);
     if (ec) {
-      BOOST_LOG(fatal) << "Couldn't open socket for Audio server: "sv << ec.message();
+      BOOST_LOG(fatal) << "Couldn't open socket for Audio server: "sv << util::error_message_utf8(ec);
 
       return -1;
     }
 
     ctx.audio_sock.bind(udp::endpoint(bind_addr, audio_port), ec);
     if (ec) {
-      BOOST_LOG(fatal) << "Couldn't bind Audio server to port ["sv << audio_port << "]: "sv << ec.message();
+      BOOST_LOG(fatal) << "Couldn't bind Audio server to port ["sv << audio_port << "]: "sv << util::error_message_utf8(ec);
 
       return -1;
     }

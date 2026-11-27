@@ -439,7 +439,8 @@ private:
     uint16_t m_ExtMvGridW = 0, m_ExtMvGridH = 0;  // 上一次的網格（變了＝重新等穩定期）
     uint8_t m_ExtMvStep = 0;              // 上一次的 frameStep（變了同樣重新等）
     bool m_ExtMvFailed = false;           // 上傳或 shader 失敗過：這個 session 不再試
-    bool m_FlowExternal = false;          // 這一張的 m_Flow 是外部遊戲 MV 寫的（dump 的 log 用）
+    bool m_FlowExternal = false;
+    bool m_ExtHudGuard = false;           // F6 HUD 保護這一張開不開（synthFlowForFrame 設，extFlowToTexture 用）          // 這一張的 m_Flow 是外部遊戲 MV 寫的（dump 的 log 用）
     pl_tex m_Mid[2] = {};            // 1/16 尺寸（位移估計的粗層），這一張與上一張
     pl_tex m_FlowC = nullptr;        // 1/16 尺寸的位移場（粗層的結果，給 1/8 那一層當起點）
     int m_SmallCur = 0;

@@ -436,6 +436,9 @@ namespace quic_server {
     // 上次 stats snapshot（用於計算 delta 速率）
     uint64_t _prevBytesByFlow[4] = {};
     std::chrono::steady_clock::time_point _prevStatsTime = std::chrono::steady_clock::now();
+    // §LOGDROP-1127：§K.10 paths 行只印有變化的路徑；這裡記上一次每條 path 的摘要（0.0Mbps 的路徑
+    // 只要狀態沒變就不再印）。索引＝stats[i].pathId 對應的位置。
+    std::vector<std::string> _prevPathSig;
 
     // §5b FEC: video datagram RS encoding (4 data + 2 parity)
     struct FecGroupState {

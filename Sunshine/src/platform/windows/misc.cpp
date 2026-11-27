@@ -432,11 +432,18 @@ namespace platf {
   }
 
   void print_status(const std::string_view &prefix, HRESULT status) {
-    char err_string[1024];
-
-    DWORD bytes = FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, status, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), err_string, sizeof(err_string), nullptr);
-
-    BOOST_LOG(error) << prefix << ": "sv << std::string_view {err_string, bytes};
+    // §LOGDROP-1127：FormatMessageA 的系統訊息是 ANSI（例如 cp950），寫進 UTF-8 日誌會變亂碼。
+    // 改用寬字元版本再轉 UTF-8；沒有訊息時只印錯誤碼。
+    wchar_t err_string[1024] {};
+    DWORD bytes = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, status, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), err_string, ARRAYSIZE(err_string), nullptr);
+    while (bytes > 0 && (err_string[bytes - 1] == L'\r' || err_string[bytes - 1] == L'\n' || err_string[bytes - 1] == L' ')) {
+      --bytes;
+    }
+    if (bytes > 0) {
+      BOOST_LOG(error) << prefix << ": "sv << utf_utils::to_utf8(std::wstring {err_string, bytes});
+    } else {
+      BOOST_LOG(error) << prefix << ": "sv << "0x"sv << util::hex(static_cast<uint32_t>(status)).to_string_view();
+    }
   }
 
   bool IsUserAdmin(HANDLE user_token) {

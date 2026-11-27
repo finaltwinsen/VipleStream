@@ -605,19 +605,34 @@ namespace quic_server {
                         << " lostB=" << totalBytesLost
                         << " stale=" << _dgramDroppedStale.load()
                         << (_failoverCnxQueue ? " [FAILOVER-CNXQ]" : "");
-        // §K.16: cwnd 警戒（已被 500-drain 限頻保護，額外 5 秒限頻避免連續告警）
-        bool cwndAlert = (cwnd > 0 && cwnd < 200000);
-        if (cwndAlert) {
-          static auto lastCwndWarn = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+        // §K.16: cwnd 警戒。§LOGDROP-1127：門檻改成相對值（48×MTU 與 0.2×bw×rtt 取大者），
+        // 且只在佇列裡真的有東西（pending>0）時警告、每 60 秒最多一行——原本寫死的 200 KB
+        // 讓 2.2 Mbps 的連結永遠達不到，97% 的警告都是誤報。
+        const uint64_t warn_mtu = (diagPathIdx < _cnx->nb_paths && _cnx->path[diagPathIdx] != nullptr)
+                                    ? _cnx->path[diagPathIdx]->send_mtu
+                                    : 1500;
+        uint64_t cwnd_floor = 48 * warn_mtu;
+        if (diagPathIdx < _cnx->nb_paths && _cnx->path[diagPathIdx] != nullptr) {
+          const auto *pth = _cnx->path[diagPathIdx];
+          // bandwidth_estimate 是 bytes/sec、smoothed_rtt 是 µs
+          const double bw_rtt_bytes = 0.2 * static_cast<double>(pth->bandwidth_estimate) * (static_cast<double>(pth->smoothed_rtt) / 1'000'000.0);
+          if (bw_rtt_bytes > static_cast<double>(cwnd_floor)) {
+            cwnd_floor = static_cast<uint64_t>(bw_rtt_bytes);
+          }
+        }
+        const bool cwnd_warn = (cwnd > 0 && cwnd < cwnd_floor && queueDepth > 0);
+        if (cwnd_warn) {
+          static auto lastCwndWarn = std::chrono::steady_clock::now() - std::chrono::seconds(60);
           auto now = std::chrono::steady_clock::now();
-          if (now - lastCwndWarn >= std::chrono::seconds(5)) {
+          if (now - lastCwndWarn >= std::chrono::seconds(60)) {
             lastCwndWarn = now;
             BOOST_LOG(warning) << "[VIPLE-MPQUIC] §K.16 cwnd LOW: " << cwnd
-                << " (floor=" << (48 * (diagPathIdx < _cnx->nb_paths && _cnx->path[diagPathIdx]
-                       ? _cnx->path[diagPathIdx]->send_mtu : 1500))
+                << " (floor=" << cwnd_floor << ", mtu=" << warn_mtu
                 << ") pending=" << queueDepth;
           }
         }
+        // §K.16-BBR-REVIVE 的觸發條件維持原本的絕對門檻（行為不變；只改上面那一行警告的門檻）
+        const bool cwndAlert = (cwnd > 0 && cwnd < 200000);
         // §K.16-BBR-REVIVE 2026-07-17：cwnd/pacing 崩塌矯正。07-17 晚間
         // lag 事故：LAN RACK 假陽性把 BBR bw_lo 閂低 → BBRBoundBWForModel
         // 取 min(max_bw, bw_lo) → pacing 掐死輸出（inFlight≈0、cwnd 釘
@@ -3032,6 +3047,11 @@ namespace quic_server {
       // §K.10 per-flow 累計 + delta 速率
       auto now = std::chrono::steady_clock::now();
       double dtSec = std::chrono::duration<double>(now - session->_prevStatsTime).count();
+      // §LOGDROP-1127：§K.10 從 5 秒改成 30 秒一次（statsLoop 仍每 5 秒跑，§K.16 矯正邏輯不受影響）。
+      // 速率用同一段視窗算，所以數字仍是「這段期間的平均」。
+      if (dtSec < 30.0) {
+        continue;
+      }
       if (dtSec < 0.1) dtSec = 0.1; // 防除零
 
       std::string flowLine;
@@ -3059,9 +3079,23 @@ namespace quic_server {
       // Per-path 品質明細
       auto stats = session->getStats();
       if (!stats.empty()) {
+        // §LOGDROP-1127：沒有吞吐量（0.0Mbps）的路徑只在狀態（RTT／loss）變化時才印，其餘省略。
         std::string pathLine;
+        std::vector<std::string> pathSigs;
+        pathSigs.reserve(stats.size());
+        bool firstPath = true;
         for (size_t i = 0; i < stats.size(); i++) {
-          if (i > 0) pathLine += " | ";
+          const std::string sig = std::to_string((int) stats[i].rttMs) + "ms/" +
+                                  std::to_string((int) stats[i].rttMinMs) + "ms/loss" +
+                                  std::to_string((int) (stats[i].lossPercent * 10) / 10.0);
+          const bool idle = (int) stats[i].throughputMbps == 0 && (int) stats[i].receiveRateMbps == 0;
+          const bool changed = i >= session->_prevPathSig.size() || session->_prevPathSig[i] != sig;
+          pathSigs.push_back(sig);
+          if (idle && !changed) {
+            continue;
+          }
+          if (!firstPath) pathLine += " | ";
+          firstPath = false;
           pathLine += "p" + std::to_string(stats[i].pathId)
                     + " RTT=" + std::to_string((int)stats[i].rttMs) + "ms"
                     + " rttMin=" + std::to_string((int)stats[i].rttMinMs) + "ms"
@@ -3071,7 +3105,10 @@ namespace quic_server {
                     + " tx=" + std::to_string(stats[i].bytesSent / 1024) + "KB"
                     + " rx=" + std::to_string(stats[i].bytesRecv / 1024) + "KB";
         }
-        BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.10 " << addr << " paths: " << pathLine;
+        session->_prevPathSig = std::move(pathSigs);
+        if (!pathLine.empty()) {
+          BOOST_LOG(info) << "[VIPLE-MPQUIC] §K.10 " << addr << " paths: " << pathLine;
+        }
       }
       // §Q-ACCT 2026-09-29：和 client 的 rxPkts／pqRecv 對帳（見 client §Q-ACCT）
       BOOST_LOG(info) << "[VIPLE-MPQUIC] §Q-ACCT server " << addr
@@ -3084,7 +3121,8 @@ namespace quic_server {
 
   void QuicListener::statsLoop() {
     while (_statsRunning.load()) {
-      // §K.10: 5 秒一次（之前 30 秒太慢，診斷時看不到即時變化）
+      // §K.10: 迴圈仍 5 秒一次（§K.16 的 cwnd 矯正要看即時值）；§K.10 的輸出本身在 logStats 裡
+      // 降成 30 秒一次（§LOGDROP-1127）。
       for (int i = 0; i < 50 && _statsRunning.load(); i++) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
       }

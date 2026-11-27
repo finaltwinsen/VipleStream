@@ -10,6 +10,7 @@
 #include <QNetworkProxy>
 #include <QHash>
 #include <QMutex>
+#include <QSet>
 
 namespace {
 // serverinfo 建構子每次 poll 都會重跑，同內容的 log 會刷版面。
@@ -629,6 +630,7 @@ bool NvComputer::wake() const
     addressMap.insert("255.255.255.255", 0);
 
     // Try to broadcast on all available NICs
+    uint32_t wolInterfaces = 0;
     const auto allInterfaces = QNetworkInterface::allInterfaces();
     for (const QNetworkInterface& nic : allInterfaces) {
         // Ensure the interface is up and skip the loopback adapter
@@ -636,6 +638,7 @@ bool NvComputer::wake() const
                 (nic.flags() & QNetworkInterface::IsLoopBack) != 0) {
             continue;
         }
+        ++wolInterfaces;
 
         QHostAddress allNodesMulticast("FF02::1");
         const auto allInterfaceAddresses = nic.addressEntries();
@@ -658,6 +661,12 @@ bool NvComputer::wake() const
 
     // Try all unique address strings or host names
     bool success = false;
+    // §LOGHYG-WOL（2026-11-27）：每個介面 × 每個埠各印一行的「Sent WoL packet」在單檔占了 98 行
+    // （使用者回報「開場 WoL 洗版」）。成功的不再逐筆印，改成結尾一行摘要；失敗很少見，照舊逐筆印。
+    uint32_t sentPackets = 0;
+    uint32_t failedPackets = 0;
+    QSet<QString> sentAddresses;
+    QSet<quint16> sentPorts;
     for (auto i = addressMap.constBegin(); i != addressMap.constEnd(); i++) {
         QHostAddress literalAddress;
         QList<QHostAddress> addressList;
@@ -688,11 +697,15 @@ bool NvComputer::wake() const
             // Send to all static ports
             for (quint16 port : STATIC_WOL_PORTS) {
                 if (sock.writeDatagram(wolPayload, address, port) == wolPayload.size()) {  // REVIEW-1111 (round 2): -1 (failure) is also "true"
-                    qInfo().nospace().noquote() << "Sent WoL packet to " << hostName << " via " << address.toString() << ":" << port;
+                    ++sentPackets;
+                    sentAddresses.insert(address.toString());
+                    sentPorts.insert(port);
                     success = true;
                 }
                 else {
-                    qWarning() << "Send failed:" << sock.error();
+                    ++failedPackets;
+                    qWarning().nospace().noquote() << "WoL send failed to " << hostName << " via "
+                                                   << address.toString() << ":" << port << ": " << sock.error();
                 }
             }
 
@@ -717,15 +730,28 @@ bool NvComputer::wake() const
                     }
 
                     if (sock.writeDatagram(wolPayload, address, quint16(mapped)) == wolPayload.size()) {  // REVIEW-1111 (round 2): -1 (failure) is also "true"
-                        qInfo().nospace().noquote() << "Sent WoL packet to " << hostName << " via " << address.toString() << ":" << mapped;
+                        ++sentPackets;
+                        sentAddresses.insert(address.toString());
+                        sentPorts.insert(quint16(mapped));
                         success = true;
                     }
                     else {
-                        qWarning() << "Send failed:" << sock.error();
+                        ++failedPackets;
+                        qWarning().nospace().noquote() << "WoL send failed to " << hostName << " via "
+                                                       << address.toString() << ":" << mapped << ": " << sock.error();
                     }
                 }
             }
         }
+    }
+
+    // §LOGHYG-WOL：一行摘要取代逐筆成功行。失敗幾筆就印幾行（很少見；失敗時才需要對哪個位址／埠有問題）。
+    if (sentPackets > 0) {
+        qInfo().nospace().noquote() << "WoL: sent " << sentPackets << " packet(s) to " << hostName
+                                    << " via " << wolInterfaces << " interface(s), "
+                                    << sentAddresses.size() << " address(es), "
+                                    << sentPorts.size() << " port(s)"
+                                    << (failedPackets > 0 ? QStringLiteral(" (%1 failed)").arg(failedPackets) : QString());
     }
 
     return success;

@@ -407,7 +407,8 @@ namespace nvenc {
         return equal_guids(init_params.encodeGUID, guid);
       };
       if (std::find_if(encode_guids.begin(), encode_guids.end(), search_predicate) == encode_guids.end()) {
-        BOOST_LOG(error) << "NvEnc: encoding format is not supported by the gpu";
+        // §LOGDROP-1127：探測（/launch 前）一定會走到這裡，這只是「這個 GPU 不支援」不是錯誤
+        BOOST_LOG(info) << "NvEnc: probe: this GPU has no " << client_config.videoFormat << " encoder";
         return false;
       }
     }
@@ -431,18 +432,19 @@ namespace nvenc {
       auto supported_width = get_encoder_cap(NV_ENC_CAPS_WIDTH_MAX);
       auto supported_height = get_encoder_cap(NV_ENC_CAPS_HEIGHT_MAX);
       if (encoder_params.width > supported_width || encoder_params.height > supported_height) {
-        BOOST_LOG(error) << "NvEnc: gpu max encode resolution " << supported_width << "x" << supported_height << ", requested " << encoder_params.width << "x" << encoder_params.height;
+        // §LOGDROP-1127：探測不支援時只記 info（不是串流錯誤）
+        BOOST_LOG(info) << "NvEnc: probe: gpu max encode resolution " << supported_width << "x" << supported_height << ", requested " << encoder_params.width << "x" << encoder_params.height;
         return false;
       }
     }
 
     if (buffer_is_10bit() && !get_encoder_cap(NV_ENC_CAPS_SUPPORT_10BIT_ENCODE)) {
-      BOOST_LOG(error) << "NvEnc: gpu doesn't support 10-bit encode";
+      BOOST_LOG(info) << "NvEnc: probe: 10-bit encode is not supported by this gpu";
       return false;
     }
 
     if (buffer_is_yuv444() && !get_encoder_cap(NV_ENC_CAPS_SUPPORT_YUV444_ENCODE)) {
-      BOOST_LOG(error) << "NvEnc: gpu doesn't support YUV444 encode";
+      BOOST_LOG(info) << "NvEnc: probe: YUV 4:4:4 encode is not supported by this gpu";
       return false;
     }
 
@@ -1041,29 +1043,35 @@ namespace nvenc {
     // [VIPLE-NVENC-PROF] tracker windows.  total = entry → after-unlock; the
     // sub-deltas isolate where the time goes (sync+map+encode_picture, then
     // wait_for_async_event, then lock+copy+unlock).
+    // §LOGDROP-1127：四項統計合併成 30 秒 1 行（原本 4 行／5 秒），欄位名稱與順序不變。
     auto _profExit = std::chrono::steady_clock::now();
     using ms_d = std::chrono::duration<double, std::milli>;
-    encoder_state.encode_total_ms_logger.collect_and_log(std::chrono::duration_cast<ms_d>(_profExit       - _profEntry).count());
-    encoder_state.encode_async_ms_logger.collect_and_log(std::chrono::duration_cast<ms_d>(_profAfterWait  - _profBeforeWait).count());
-    encoder_state.encode_lock_ms_logger.collect_and_log( std::chrono::duration_cast<ms_d>(_profAfterLock  - _profAfterWait).count());
-    encoder_state.encode_bsize_logger.collect_and_log(static_cast<double>(encoded_frame.data.size()));
-
-    // [VIPLE-NVENC-RATE] explicit per-second call rate counter so we can tell
-    // whether the encoder loop actually iterates 120/sec or is being gated.
     {
-      static thread_local std::chrono::steady_clock::time_point bucketStart{};
-      static thread_local uint32_t bucketCount = 0;
-      if (bucketStart.time_since_epoch().count() == 0) {
-        bucketStart = _profExit;
-      }
-      bucketCount++;
-      auto bucketMs = std::chrono::duration_cast<ms_d>(_profExit - bucketStart).count();
-      if (bucketMs >= 5000.0) {
-        double rate = bucketCount * 1000.0 / bucketMs;
-        BOOST_LOG(info) << "[VIPLE-NVENC-RATE] encode_frame called " << bucketCount
-                        << " times over " << bucketMs << "ms = " << rate << " calls/sec";
-        bucketCount = 0;
-        bucketStart = _profExit;
+      auto &es = encoder_state;
+      es.prof_total.add(std::chrono::duration_cast<ms_d>(_profExit - _profEntry).count());
+      es.prof_async.add(std::chrono::duration_cast<ms_d>(_profAfterWait - _profBeforeWait).count());
+      es.prof_lock.add(std::chrono::duration_cast<ms_d>(_profAfterLock - _profAfterWait).count());
+      es.prof_bsize.add(static_cast<double>(encoded_frame.data.size()));
+      ++es.prof_calls;
+      // §LOGDROP-1127：只有 info 可見時才輸出（debug 場次不需要這些統計）
+      const auto window = _profExit - es.prof_window_start;
+      if (config::sunshine.min_log_level <= 2 && window >= std::chrono::seconds(30)) {
+        const double secs = std::max(0.001, std::chrono::duration<double>(window).count());
+        const auto f = [](const auto &s) {
+          return std::format("{:.2f}/{:.2f}/{:.2f}", s.min_v, s.max_v, s.avg());
+        };
+        BOOST_LOG(info) << "[VIPLE-NVENC] 30s: calls=" << es.prof_calls
+                        << " (" << std::format("{:.1f}", es.prof_calls / secs) << "/s)"
+                        << " encode_frame total=" << f(es.prof_total) << "ms"
+                        << " wait_async_evt=" << f(es.prof_async) << "ms"
+                        << " lock_bitstream=" << f(es.prof_lock) << "ms"
+                        << " bitstream_size=" << f(es.prof_bsize) << "B";
+        es.prof_window_start = _profExit;
+        es.prof_calls = 0;
+        es.prof_total.reset();
+        es.prof_async.reset();
+        es.prof_lock.reset();
+        es.prof_bsize.reset();
       }
     }
 

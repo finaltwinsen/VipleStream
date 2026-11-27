@@ -19,6 +19,12 @@
 #include <variant>
 #include <vector>
 
+#include <boost/system/error_code.hpp>
+
+#ifdef _WIN32
+#  include "src/platform/windows/utf_utils.h"
+#endif
+
 #define KITTY_WHILE_LOOP(x, y, z) \
   { \
     x; \
@@ -125,6 +131,27 @@ struct argument_type<T(U)> {
   auto &a = std::get<b>(expr)
 
 namespace util {
+
+  /**
+   * @brief 把系統／Boost 錯誤碼的訊息轉成 UTF-8。
+   * @details §LOGDROP-1127：Windows 上 std::error_code／boost::system::error_code 的系統訊息是 ANSI
+   *          （例如 cp950），直接寫進 UTF-8 日誌會變亂碼。其他平台原樣回傳。
+   */
+  inline std::string error_message_utf8(const std::error_code &ec) {
+#ifdef _WIN32
+    return utf_utils::from_acp(ec.message());
+#else
+    return ec.message();
+#endif
+  }
+
+  inline std::string error_message_utf8(const boost::system::error_code &ec) {
+#ifdef _WIN32
+    return utf_utils::from_acp(ec.message());
+#else
+    return ec.message();
+#endif
+  }
 
   template<template<typename...> class X, class... Y>
   struct __instantiation_of: public std::false_type {};

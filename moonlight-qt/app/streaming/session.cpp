@@ -101,6 +101,9 @@ static uint32_t stallNowMs() { return GetTickCount(); }   // 與 GetLastInputInf
 //   - 印主執行緒的等待鏈（Wait Chain Traversal）：跨行程的等待（輸入法／hook／SendMessage／ALPC）
 //     鏈上會出現別的行程；卡在同步 IOCTL 時鏈上只有本執行緒。
 //   - 同樣內容附加寫進 log 目錄下不輪替的 input-stall.log（上限 1 MB，滿了只留後半）。
+// §LOGHYG-STALL（2026-11-27）：這批 log 顯示一位使用者 90 分鐘內 19 次停頓、每次 24 行堆疊、單檔 454 行。
+//   完整堆疊改成「這次執行第一次停頓」與之後「每 60 秒最多一次」，其餘只印觸發行與 recovered 行
+//   （時間、時長、phase 都還在），input-stall.log 也只收真的有抄堆疊的那幾筆。
 // 全部在 watchdog 執行緒上做。主執行緒被暫停的那一小段只做三件不拿使用者態鎖、不配置記憶體的事：
 // GetThreadContext、VirtualQuery（都是系統呼叫）、把堆疊記憶體 memcpy 到靜態緩衝區。展開堆疊
 // （StackWalk64 會進 dbghelp，可能配置記憶體、拿 loader 相關的鎖）一律等恢復主執行緒之後，
@@ -464,6 +467,12 @@ static int inputStallWatchdogProc(void*)
     StallStack firstStack = {};
     int32_t reportedPhase = -2;
     uint32_t stallCount = 0;
+    // §LOGHYG-STALL：完整堆疊（每次 20 幾行）只在這次執行第一次停頓、之後每 60 秒最多一筆。
+    // 其餘停頓只印觸發行與 recovered 行（時間、時長、phase 都在裡面），單檔 454 行降到約 50 行。
+    // 真正的證據仍有 input-stall.log；但只在真的抄堆疊的那幾次寫，避免同一個檔案也被洗版。
+    bool captureStacks = false;
+    int stackDumpCount = 0;
+    uint32_t lastStackDumpMs = 0;
     while (s_StallWatchdogRun.load()) {
         SDL_Delay(10);
         uint32_t now = stallNowMs();
@@ -479,14 +488,16 @@ static int inputStallWatchdogProc(void*)
                 stallAppendToFile(rec);
                 reported = false;
                 captures = 0;
+                captureStacks = false;
             }
             lastBeat = beat;
             lastBeatChangeMs = now;
             continue;
         }
         uint32_t stale = now - lastBeatChangeMs;
-        if (reported && ((captures == 0 && stale >= kStallCapture1Ms) ||
-                         (captures == 1 && stale >= kStallCapture2Ms && now - cap1Ms >= kStallCaptureGapMs))) {
+        if (reported && captureStacks &&
+                ((captures == 0 && stale >= kStallCapture1Ms) ||
+                 (captures == 1 && stale >= kStallCapture2Ms && now - cap1Ms >= kStallCaptureGapMs))) {
             if (captures == 0) cap1Ms = now;
             StallStack st;
             stallCaptureMainThreadStack(&st, lastBeat);
@@ -510,7 +521,11 @@ static int inputStallWatchdogProc(void*)
             }
             stallLogWaitChain(&rec, st.wct);
             stallAppendToFile(rec);
-            if (captures == 0) firstStack = st;
+            if (captures == 0) {
+                firstStack = st;
+                stackDumpCount++;
+                lastStackDumpMs = now;
+            }
             captures++;
         }
         if (stale < 50 || reported) continue;
@@ -529,6 +544,8 @@ static int inputStallWatchdogProc(void*)
         reported = true;
         reportedPhase = s_LoopPhase.load();
         stallCount++;
+        // §LOGHYG-STALL：這次停頓要不要抄完整堆疊（第一次一定抄，之後每 60 秒一次）。
+        captureStacks = (stackDumpCount == 0) || (now - lastStackDumpMs >= 60000);
         char pn[48]; stallPhaseName(reportedPhase, pn, sizeof(pn));
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "[VIPLE-INPUT-STALL] main loop unresponsive %u ms with user input pending (phase=%s) #%u",

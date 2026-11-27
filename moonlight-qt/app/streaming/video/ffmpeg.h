@@ -210,6 +210,9 @@ private:
         uint32_t decodedFrames;
         uint32_t networkDroppedFrames;
         uint32_t totalFrames;
+        uint32_t hostRepeatFrames;  // §LOGHYG-NET10：host 沒附時戳＝重送上一張的幀
+        uint32_t hostLatFrames;       // 這一秒有附處理延遲的幀（判斷「0」可不可解讀）
+        uint32_t pacerDroppedFrames;  // 這一秒 client 主動丟掉的幀（解碼後沒呈現）
         double decodeMeanMs;
         double hostLatAvgMs;   // < 0 = 該秒無 host latency 回報（印 n/a）
         bool flushed;          // 已印過秒級行（pre-flush 不重印）
@@ -238,6 +241,10 @@ private:
     uint64_t m_LowRecvWindowBits = 0;  // 每秒 1 bit：該秒 recv% < 80
     uint32_t m_WarnWndRecv[60] = {};   // 該秒 receivedFrames
     uint32_t m_WarnWndDrop[60] = {};   // 該秒 networkDroppedFrames
+    uint32_t m_WarnWndDup[60] = {};    // §LOGHYG-NET10：該秒 host 重送幀（hostRepeatFrames）
+    // §LOGHYG-NET10：這個 session 的 host 至少回報過一次非 0 的處理延遲。只有這樣，
+    // 「延遲 = 0」才能解讀成「重送上一張」；舊 host／不報延遲的擷取路徑整場都是 0。
+    bool m_HostLatReported = false;
     int m_WarnWndIdx = 0;
     int m_WarnWndFill = 0;
     int m_RatioWarnCooldownSec = 0;    // > 0 遞減；歸零才可再警

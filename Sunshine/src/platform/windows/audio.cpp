@@ -355,6 +355,36 @@ namespace platf::audio {
     return audio_client;
   }
 
+  /**
+   * @brief §LOGDROP-1127：音訊擷取失敗時列舉可用播放端點（只印數量與 ID 前 16 碼，遮掉後半的裝置 GUID）。
+   */
+  void log_render_endpoint_summary(device_enum_t &device_enum) {
+    IMMDeviceCollection *collection = nullptr;
+    if (FAILED(device_enum->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &collection)) || !collection) {
+      BOOST_LOG(info) << "[VIPLE-AUD] active render endpoints: could not be enumerated";
+      return;
+    }
+    UINT count = 0;
+    collection->GetCount(&count);
+    BOOST_LOG(info) << "[VIPLE-AUD] active render endpoints=" << count;
+    for (UINT i = 0; i < count && i < 4; ++i) {
+      IMMDevice *dev = nullptr;
+      if (FAILED(collection->Item(i, &dev)) || !dev) {
+        continue;
+      }
+      audio::wstring_t id;
+      if (SUCCEEDED(dev->GetId(&id)) && id.get()) {
+        std::string text = utf_utils::to_utf8(id.get());
+        if (text.size() > 16) {
+          text = text.substr(0, 16) + "...";
+        }
+        BOOST_LOG(info) << "[VIPLE-AUD]   endpoint[" << i << "] id=" << text;
+      }
+      dev->Release();
+    }
+    collection->Release();
+  }
+
   device_t default_device(device_enum_t &device_enum) {
     device_t device;
     HRESULT status;
@@ -366,6 +396,8 @@ namespace platf::audio {
 
     if (FAILED(status)) {
       BOOST_LOG(error) << "Couldn't get default audio endpoint [0x"sv << util::hex(status).to_string_view() << ']';
+      // §LOGDROP-1127：整場沒有聲音時，至少能從 log 判斷是「沒有端點」還是「預設端點不見了」
+      log_render_endpoint_summary(device_enum);
 
       return nullptr;
     }
@@ -1245,7 +1277,11 @@ namespace platf {
     // the sink information returned includes the new Steam Streaming Speakers device.
     if (config::audio.install_steam_drivers && !control->find_device_id(control->match_steam_speakers())) {
       // This is best effort. Don't fail if it doesn't work.
-      control->install_steam_audio_drivers();
+      // §LOGDROP-1127：失敗時明確留一行 warning（細節由 install_steam_audio_drivers 依原因印出），
+      // 方便把「整場沒有聲音」直接歸因到虛擬音訊裝置沒裝起來。
+      if (!control->install_steam_audio_drivers()) {
+        BOOST_LOG(warning) << "[VIPLE-AUD] Steam Streaming Speakers install failed - the stream may have no virtual audio sink"sv;
+      }
     }
 
     return control;

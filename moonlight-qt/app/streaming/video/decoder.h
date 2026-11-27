@@ -15,6 +15,12 @@ typedef struct _VIDEO_STATS {
     uint32_t totalFrames;
     uint32_t networkDroppedFrames;
     uint32_t pacerDroppedFrames;
+    // §LOGHYG-NET10（2026-11-27）：host 沒有附擷取時戳的幀。host 把「畫面沒有更新、重送上一張」
+    // 編成新幀時不帶 frame_timestamp（Sunshine stream.cpp 的 frame_is_dupe），header 的
+    // frame_processing_latency 因此是 0；這是 client 端唯一能分辨「靜態畫面重複幀」與
+    // 「主機真的跟不上」的訊號。只有在這個 session 看過 host 回報非 0 延遲時才拿它當重複幀
+    // （見 FFmpegVideoDecoder::m_HostLatReported）。
+    uint32_t hostRepeatFrames;
     uint16_t minHostProcessingLatency;         // low-res from RTP
     uint16_t maxHostProcessingLatency;         // low-res from RTP
     uint32_t totalHostProcessingLatency;       // low-res from RTP
