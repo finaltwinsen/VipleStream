@@ -1,6 +1,6 @@
 # VipleStream
 
-**English** · [繁體中文](#繁體中文)
+<a id="en"></a>**English** · [繁體中文](#zh-tw)
 
 A self-hosted game-streaming stack for Windows, Linux, Android and the **Steam Frame** headset. It is a fork of [Sunshine](https://github.com/LizardByte/Sunshine) (host) and [Moonlight](https://github.com/moonlight-stream) (clients), extended with PC VR streaming to the Steam Frame, internet play without port forwarding, multi-path networking, frame interpolation and Steam integration. It stays wire-compatible with upstream Sunshine and Moonlight.
 
@@ -220,11 +220,13 @@ More: [`docs/setup_guide.md`](docs/setup_guide.md) (configuration and troublesho
 - **Android relay TLS:** the relay WebSocket trusts any certificate because TLS is terminated by a reverse proxy; the game stream itself keeps Moonlight's certificate pinning.
 - **Steam credentials:** the host never sees your Steam password. Account switching only runs `steam.exe -login <account>`, which relies on Steam's own remembered sign-in.
 - **Hotspot keys:** the headset passes its hotspot details to the host over the encrypted control channel; keys are never written to logs.
+- **Web UI and launching (2.0.318):** first-time account setup follows `origin_web_ui_allowed` (default `lan`: not from the internet); repeated wrong logins from one address are locked out for a while; when two devices are waiting for a PIN at once the PIN is refused instead of guessed; the host's plain-HTTP launch endpoints only accept the relay; a relay without `relay_psk` can no longer start, resume or quit apps.
 
 ## Version highlights
 
 | Version | Highlights |
 |---|---|
+| **2.0.318** | Game motion vectors for VR frame synthesis (the headset can use the game's own motion vectors for its in-between frames and keeps HUDs from smearing; needs the UEVR plugin built from `Sunshine/tools/uevr_mv_plugin`, not included in the release yet); flat-screen static pictures now reach the requested frame rate (64 → 144 fps); precise timers for delayed input work; a full security and robustness review (web UI first-time setup, login lockout, PIN with two pending pairings, launch only via relay token, relay PSK required to launch, encoder teardown and capture-error recovery, idle power use); **desktop client self-update was broken in 2.0.285 — update it by hand once**; anonymous logs mask user and device names more thoroughly. |
 | **2.0.285** | VITURE Beast glasses on Android: SteamVR games in 3D side by side with head tracking from the glasses (no VRto3D needed), adaptive gyro drift and noise handling remembered per pair of glasses, head-pose prediction plus rotational timewarp on the phone, an on-screen trigger button; Meta Quest client groundwork; optional anonymous log upload on every platform, asked once at first start; installers for the Windows server (registers the service, firewall rules and ViGEmBus), the Windows client and a Linux client .deb, and a single-file Steam Frame installer; automatic updates checked end to end; streaming while nobody is signed in on the host (the session is moved to the console and locked); Intel QSV bitrate changes fixed; Steam Streaming Speakers installed automatically again. |
 | **2.0.270** | A stream control menu on the host replaces the Windows power menu during flat-screen streams (disconnect, quit app, lock, sleep, shut down, restart), also for clicks coming from a Steam Controller; flat-screen streams re-request lost packets instead of freezing, send a key frame 250 ms after a loss and lower the bitrate from the host's own send statistics; flat-screen multi-link on the local network; VR at home raises the bitrate while the picture can still improve (100–150 Mbps in our test) and the headset sharpens the picture; the headset hotspot is opened when the app starts, reports its state both ways and backs off from hosts that cannot join; file management in video mode; headset keyboard with Caps lock, a number pad and a 中/英 key that switches the host's input method by state; Windows server download 39 → 22 MiB; three review rounds of fixes. |
 | **2.0.206** | VR from outside over a VPN: lost packets re-requested on remote paths, packets spread out on lines with short gaps, half rate getting its full bitrate, the idle headset hotspot paused; controllers predicted to the displayed frame (bat path error 1.39 → 0.34 mm median over the VPN) with a trigger-held hand left steady; sharp centre and periphery moving together; at home the local address is preferred from the start, the headset hotspot switches on and off by itself and the host joins it in about 6 s instead of 20–30; a start-up crash on the headset fixed. |
@@ -252,9 +254,11 @@ The `moonlight-common-c` portions remain under LGPL-3.0; everything else (server
 
 ---
 
+<a id="zh-tw"></a>
+
 # 繁體中文
 
-[English](#viplestream) · **繁體中文**
+[English](#en) · **繁體中文**
 
 自架的遊戲串流套件，支援 Windows、Linux、Android 與 **Steam Frame** 頭盔。以 [Sunshine](https://github.com/LizardByte/Sunshine)（主機端）與 [Moonlight](https://github.com/moonlight-stream)（用戶端）為基礎分支，加上 Steam Frame 的 PC VR 串流、不必設定連接埠轉送的外網連線、多路徑傳輸、補幀與 Steam 整合，並維持與原版 Sunshine／Moonlight 的通訊協定相容。
 
@@ -474,11 +478,13 @@ VipleStream 會開在自己的 VR 介面裡（雷射指標：扳機＝點選、�
 - **Android 中繼 TLS：** 中繼的 WebSocket 不驗憑證（TLS 由反向代理處理）；遊戲串流本身仍是 Moonlight 的憑證綁定。
 - **Steam 帳密：** 主機不會看到 Steam 密碼；切換帳號只執行 `steam.exe -login <帳號>`，靠 Steam 自己記住的登入。
 - **熱點金鑰：** 頭盔經加密控制通道把熱點資訊交給主機，金鑰不會寫進任何 log。
+- **網頁介面與啟動（2.0.318）：** 第一次設定帳密依 `origin_web_ui_allowed`（預設 `lan`：外網不行）；同一位址連續登入錯誤會暫時鎖住；同時有兩台裝置在等 PIN 時會拒絕、不再猜是哪一台；主機的 HTTP 啟動端點只接受中繼；沒設 `relay_psk` 的中繼不能再開始、接續或結束 App。
 
 ## 版本摘要
 
 | 版本 | 重點 |
 |---|---|
+| **2.0.318** | VR 補幀可用遊戲自己的動態向量（頭盔補出的中間幀更準、HUD 不再被拖花；要自行從 `Sunshine/tools/uevr_mv_plugin` 建 UEVR 外掛，發佈檔還沒附）；2D 靜態畫面達到要求的幀率（64 → 144 fps）；延遲輸入改用精確計時；完整的安全與穩健性審查（網頁首次設定、登入鎖定、兩台同時等 PIN、啟動只認中繼憑證、中繼要 PSK 才能啟動、編碼器拆除與擷取錯誤的恢復、閒置耗電）；**2.0.285 的桌面 client 自動更新壞了，請手動更新一次**；匿名 log 更徹底遮掉使用者與裝置名稱。 |
 | **2.0.285** | Android 支援 VITURE Beast 眼鏡：SteamVR 遊戲以左右並排 3D 顯示、頭部追蹤用眼鏡的感測器（不需要 VRto3D），陀螺儀零偏與雜訊自動適應並依眼鏡記住，手機端姿態預測與時間扭曲，畫面上有扳機按鈕；Meta Quest client 骨架；所有平台都可選擇匿名上傳 log（第一次啟動時詢問）；Windows server（註冊服務、防火牆、ViGEmBus）、Windows client、Linux client .deb 安裝包，Steam Frame 單檔安裝；自動更新端到端驗過；host 沒人登入也能串流（工作階段移到主控台並鎖定）；修正 Intel QSV 改碼率；Steam Streaming Speakers 恢復自動安裝。 |
 | **2.0.270** | 2D 串流時主機畫的串流控制選單取代 Windows 的電源選單（中斷串流、結束 App、鎖定、睡眠、關機、重新啟動），Steam Controller 點的也算；2D 串流掉封包時重新要求而不凍結、丟包後 250 ms 補關鍵幀、主機依自己的送出統計降碼率；區域網路的 2D 多連線；在家的 VR 在畫質還能變好時繼續加碼率（實測 100～150 Mbps），頭盔端加銳化；頭盔熱點在 App 啟動時就開、兩端互相回報狀態、對連不上的主機退避；影片模式的檔案管理；頭盔鍵盤加上 Caps 鎖定、數字鍵盤，「中/英」鍵由主機依輸入法狀態切換；Windows server 下載檔 39 → 22 MiB；三輪審查修正。 |
 | **2.0.206** | 在外面經 VPN 玩 VR：遠端路徑也會重新要求掉的封包、線路有短空檔時封包攤開送、半速拿到完整碼率、閒置的頭盔熱點自動暫停；手把預測到畫面顯示的那一刻（經 VPN 的球拍軌跡誤差中位數 1.39 → 0.34 mm），扳機按著的手保持穩定；清楚的中央和周邊一起動；在家一開始就優先用區域網路位址，頭盔熱點自動開關、主機約 6 秒連上（原本 20～30 秒）；修掉頭盔啟動 VR 時的當機。 |
